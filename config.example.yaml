@@ -1,0 +1,65 @@
+# config.example.yaml — copy to config.yaml (gitignored) and edit.
+# Secrets never go here; see .env.example.
+
+server:
+  host: 127.0.0.1                 # localhost only; ngrok fronts it
+  port: 3850
+  publicURL: https://<reserved-subdomain>.ngrok.app
+
+auth:
+  bearerToken:
+    env: SHIM_BEARER_TOKEN         # resolved from .env / OS env, never stored here
+  # For zero-lockstep rotation, configure a list instead of the single
+  # `bearerToken` above (set one or the other, not both). The server accepts a
+  # request bearing ANY listed token: add the new one, switch claude.ai over at
+  # your leisure, then drop the old one.
+  # bearerTokens:
+  #   - env: SHIM_BEARER_TOKEN       # current
+  #   - env: SHIM_BEARER_TOKEN_NEXT  # next (during rotation)
+
+# One or more named directory trees. The tool `workspace` param selects one and
+# defaults to "default". Permissions (policy/read/grep/gitignore) are per-workspace.
+workspaces:
+  - name: default
+    root: /absolute/path/to/a/tree     # this workspace's os.Root sandbox
+    respectGitignore: true             # via grrep IgnoreSet (works on any tree)
+    policy:                            # allow/deny on top of os.Root (BLOCKED wins)
+      allowGlobs:
+        - "**/*.md"
+        - "**/*.go"
+        - "**/*.txt"
+        - "docs/**"
+        - "README*"
+      blockGlobs:
+        - ".git/**"
+        - "**/.env"
+        - "**/.env.*"
+        - "**/*secret*"
+        - "**/*credential*"
+        - "**/*.pem"
+        - "**/*.key"
+        - "**/id_rsa*"
+        - "**/.ssh/**"
+        - "**/node_modules/**"
+    read:
+      maxBytes: 1000000
+    grep:
+      enabled: true
+      workers: 0                       # 0 = GOMAXPROCS
+      maxMatches: 500
+
+  - name: notes                        # a second, tighter workspace
+    root: /absolute/path/to/notes
+    respectGitignore: false
+    policy:
+      allowGlobs: ["**/*.md"]
+      blockGlobs: ["**/.git/**"]
+    read:
+      maxBytes: 250000
+    grep:
+      enabled: true
+      workers: 0
+      maxMatches: 200
+
+log:
+  level: info
