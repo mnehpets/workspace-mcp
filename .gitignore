@@ -19,6 +19,20 @@ pnpm-debug.log*
 .env.*
 !.env.example
 
+# Local config (secrets-free, but host-specific; never commit)
+config.yaml
+config.local.yaml
+!config.example.yaml
+ngrok.yml
+!ngrok.example.yml
+
+# Host-specific local Claude CLI MCP registration (absolute paths)
+.mcp.json
+
+# Go build artifacts
+/shim
+*.test
+
 # OS / editor files
 .DS_Store
 Thumbs.db
