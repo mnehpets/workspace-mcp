@@ -26,10 +26,12 @@ type GrepRequest struct {
 	WordBoundary    bool
 }
 
-// GrepResult is the search outcome.
+// GrepResult is the search outcome. Notice carries an optional steering hint
+// (set by the caller when Truncated) telling the model how to get the rest.
 type GrepResult struct {
 	Matches   []grrep.Match `json:"matches"`
 	Truncated bool          `json:"truncated"`
+	Notice    string        `json:"notice,omitempty"`
 }
 
 // Grep searches file contents under req.Path. It compiles the matcher (a bad

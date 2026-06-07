@@ -266,7 +266,7 @@ override ([mcp/server.go:48]).
 
 | Method | Behavior |
 |---|---|
-| `initialize` | Negotiate protocol version (supported, newest-first: `2025-06-18`, `2025-03-26`, `2024-11-05`; unknown → our newest). Advertise `{ capabilities: { tools: {} } }` + serverInfo `{ name: "workspace-mcp", version }`. ([mcp/server.go:67]) |
+| `initialize` | Negotiate protocol version (supported, newest-first: `2025-06-18`, `2025-03-26`, `2024-11-05`; unknown → our newest). Advertise `{ capabilities: { tools: {} } }` + serverInfo `{ name: "workspace-mcp", version }` + an `instructions` string (§5.5). ([mcp/server.go:67]) |
 | `notifications/initialized` | Accept; no response. |
 | `ping` | Respond with `{}`. |
 | `tools/list` | Return the catalog (§5.3). Workspace-*independent*; the `workspace` param's enum is filled from config so the model sees valid names + the default. ([mcp/server.go:123]) |
@@ -291,6 +291,7 @@ Six tools today ([mcp/tools.go:58]). **Every tool except `workspace_list` takes 
 `workspace` string** (optional; omit → `"default"`; advertised as a JSON-Schema
 `enum` of configured names). All `path` args are workspace-relative and resolve
 through that workspace's `os.Root`. Schemas use `additionalProperties: false`.
+Every tool also carries read-only MCP **annotations** (§5.5).
 
 > Notation below: `in` = input properties (★ = required), `out` = the structured
 > JSON inside the result's text block.
@@ -310,16 +311,18 @@ List directory entries.
 #### `file_read`
 Read one allowed file.
 - **in** `path` ★, `workspace`, `maxBytes` (capped by `read.maxBytes`)
-- **out** `{ "path": string, "content": string, "truncated": bool, "binary": bool }`
+- **out** `{ "path": string, "content": string, "truncated": bool, "binary": bool, "notice"?: string }`
 - Opens via `os.Root`; binary detected by a NUL probe over the first 8 KB — when
-  binary, `content` is omitted and `binary: true`. Oversize → `truncated: true`.
-  ([mcp/tools.go:284]) *(Planned: `startLine`/`endLine` ranges — PLAN §12.13; raw
+  binary, `content` is omitted and `binary: true`. Oversize → `truncated: true`
+  plus a steering `notice` (§5.5). ([mcp/tools.go:284]) *(Planned: `startLine`/`endLine` ranges — PLAN §12.13; raw
   base64 binary delivery — PLAN §12.15.)*
 
 #### `tree_find`
 Fuzzy filename search.
 - **in** `query` ★, `workspace`, `limit` (default 100)
-- **out** `{ "files": [ string, … ] }` (workspace-relative paths). ([mcp/tools.go:362])
+- **out** `{ "files": [ string, … ], "truncated"?: bool, "notice"?: string }`
+  (workspace-relative paths; capped at `limit` → `truncated` + steering `notice`,
+  §5.5). ([mcp/tools.go:362])
 
 #### `tree_grep`
 Concurrent content search (vendored grrep core). Requires `grep.enabled`.
@@ -327,11 +330,11 @@ Concurrent content search (vendored grrep core). Requires `grep.enabled`.
   `fixedString` (default **true** = literal substring; false = Go regexp with a
   literal pre-filter), `caseInsensitive`, `wordBoundary`
 - **out** `{ "matches": [ { "path": string, "line": int, "text": string } ],
-  "truncated": bool }`
+  "truncated": bool, "notice"?: string }`
 - `fastwalk` traversal, policy + `IgnoreSet` + `.git`/dotfile skip, NUL-byte binary
   skip, each leaf opened via `os.Root`, worker pool sized by `grep.workers`, capped
-  at `grep.maxMatches` (`truncated` when hit). Disabled → `GREP_DISABLED`; bad
-  regex → `INVALID_PATTERN` (no walk). ([mcp/tools.go:392])
+  at `grep.maxMatches` (`truncated` + steering `notice` when hit, §5.5). Disabled →
+  `GREP_DISABLED`; bad regex → `INVALID_PATTERN` (no walk). ([mcp/tools.go:392])
 
 #### `git_status`
 Read-only status, git-repo workspaces only.
@@ -364,6 +367,38 @@ Two failures are *not* in this envelope: an **unknown tool name** is a JSON-RPC
 `InvalidParams` protocol error, and a **missing/invalid bearer** is an HTTP `401`
 with no body detail. `NOT_FOUND` is deliberately indistinguishable from a policy
 denial where distinguishing would leak the existence of a blocked path.
+
+### 5.5 Orientation — how the model learns what to do
+
+The server is only useful if the model knows *what it is for* and *how to
+navigate*. Tool descriptions are prompts: every word shapes selection, so we
+spend orientation cheaply at three layers, designed to be redundant because
+general-purpose hosts may ignore any one of them.
+
+- **Server `instructions`** ([mcp/server.go]) — a short string returned at
+  `initialize`, before any reasoning: the server's identity (a read-only window
+  onto local trees for research/workflow, *not* a coding agent; the model does the
+  analysis), the orient-first flow (`workspace_list` → read README → locate →
+  read), and the hard constraints (read-only; default-deny, so `NOT_FOUND` /
+  `POLICY_DENIED` are *expected answers*, not transient errors to retry).
+  **Best-effort:** the MCP spec lets servers send it, but some hosts ignore it
+  (claude.ai's handling is unverified — see PLAN §12.16). So it is never
+  load-bearing; the two layers below stand alone.
+- **Tool descriptions** ([mcp/tools.go]) — each says *what* it does, *when* to
+  reach for it, and its *boundary vs siblings* (e.g. `tree_find` = locate by name,
+  `tree_grep` = locate by content; `file_read` follows the locators).
+  `workspace_list` is worded as the **"start here"** entry point — the natural
+  first call that survives a host dropping `instructions`.
+- **Tool annotations** ([mcp/tools.go]) — every tool carries MCP
+  `{ readOnlyHint: true, openWorldHint: false }` plus a human `title`. A
+  machine-readable restatement of "this only reads, and only from the local
+  sandbox," which clients can surface in UI and trust decisions.
+
+**Truncation steers, it doesn't just flag.** When a result is capped
+(`file_read` by bytes, `tree_grep`/`tree_find` by their caps) the response adds a
+`notice` string telling the model how to get the rest — narrow the `path`, tighten
+the `pattern`, raise `maxBytes`/`limit` — instead of letting it treat a partial
+result as complete.
 
 ---
 

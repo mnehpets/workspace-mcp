@@ -172,10 +172,24 @@ func TestIntegrationReadFlow(t *testing.T) {
 		Content   string `json:"content"`
 		Truncated bool   `json:"truncated"`
 		Binary    bool   `json:"binary"`
+		Notice    string `json:"notice"`
 	}
 	f.callTool(t, "file_read", map[string]any{"workspace": "default", "path": "README.md"}, &fr)
 	if !strings.Contains(fr.Content, "# Project") {
 		t.Errorf("README content wrong: %q", fr.Content)
+	}
+
+	// file_read truncated by maxBytes carries a steering notice (not just a flag).
+	var frt struct {
+		Truncated bool   `json:"truncated"`
+		Notice    string `json:"notice"`
+	}
+	f.callTool(t, "file_read", map[string]any{"workspace": "default", "path": "README.md", "maxBytes": 1}, &frt)
+	if !frt.Truncated {
+		t.Error("expected truncated=true with maxBytes=1")
+	}
+	if frt.Notice == "" {
+		t.Error("expected a steering notice on a truncated file_read")
 	}
 
 	// file_read blocked .env -> POLICY_DENIED.

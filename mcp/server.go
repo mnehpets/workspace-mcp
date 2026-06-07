@@ -56,6 +56,7 @@ type InitializeResult struct {
 	ProtocolVersion string         `json:"protocolVersion"`
 	Capabilities    map[string]any `json:"capabilities"`
 	ServerInfo      serverInfo     `json:"serverInfo"`
+	Instructions    string         `json:"instructions,omitempty"`
 }
 
 type serverInfo struct {
@@ -63,12 +64,29 @@ type serverInfo struct {
 	Version string `json:"version"`
 }
 
+// serverInstructions is the MCP `instructions` string, delivered once at
+// initialize (before any tool reasoning). It is best-effort: the spec lets
+// servers send it, but general-purpose hosts may ignore it — so the tool
+// descriptions and workspace_list ("start here") must stand on their own too.
+// Keep it short: identity, the orient-first flow, and the hard constraints.
+const serverInstructions = `This server is a read-only window into one or more local directory trees ("workspaces") — notes, docs, papers, code, data on the user's machine. It hands you raw bytes plus cheap orientation; YOU do the analysis. It is not a coding agent and cannot run commands or write anything.
+
+How to use it:
+1. Call workspace_list first to discover the available workspaces (the "workspace" argument on every other tool defaults to "default").
+2. Orient before diving: list a workspace's root with tree_list and read its README.md (and AGENTS.md/CLAUDE.md if present) with file_read to learn what it contains.
+3. Locate: tree_find for files whose name you can guess; tree_grep to find where a term appears when you don't know the file. Narrow tree_grep with "path" to avoid truncation.
+4. Read: file_read returns a file's contents; large files truncate at a byte cap (raise "maxBytes" up to the workspace limit).
+5. git_status gives branch + per-file change codes on git-repo workspaces.
+
+Constraints: read-only (no writes, shell, or git mutation exist). Access is default-deny — some paths are intentionally invisible, so a NOT_FOUND or POLICY_DENIED is an expected answer, not a transient error to retry. All paths are workspace-relative; absolute paths and ".." are rejected.`
+
 // Initialize negotiates a protocol version and advertises the tools capability.
 func (s *Server) Initialize(_ context.Context, p InitializeParams) (InitializeResult, error) {
 	return InitializeResult{
 		ProtocolVersion: negotiateProtocol(p.ProtocolVersion),
 		Capabilities:    map[string]any{"tools": map[string]any{}},
 		ServerInfo:      serverInfo{Name: serverName, Version: serverVersion},
+		Instructions:    serverInstructions,
 	}, nil
 }
 

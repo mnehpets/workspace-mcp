@@ -19,6 +19,18 @@ type Tool struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	InputSchema map[string]any `json:"inputSchema"`
+	Annotations map[string]any `json:"annotations,omitempty"`
+}
+
+// readOnlyAnnotations is the MCP tool-annotation set every tool here shares:
+// each only reads, and only from the local sandbox (no external/open world).
+// title is a human-readable display name for clients that surface one.
+func readOnlyAnnotations(title string) map[string]any {
+	return map[string]any{
+		"title":         title,
+		"readOnlyHint":  true,
+		"openWorldHint": false,
+	}
 }
 
 // workspaceProp builds the shared `workspace` schema property. It advertises the
@@ -63,55 +75,70 @@ func (s *Server) toolDefs() []Tool {
 	wsProp := func() map[string]any { return workspaceProp(names) }
 	return []Tool{
 		{
-			Name:        "workspace_list",
-			Description: "List the configured workspaces (directory trees) available to operate on.",
+			Name: "workspace_list",
+			Description: "Start here. Lists the available workspaces (named local directory trees) you can operate on, and whether each is a git repository. " +
+				"Call this first to discover valid `workspace` values, then orient yourself in one (list its root, read its README) before using the other tools. No parameters.",
 			InputSchema: schema(map[string]any{}),
+			Annotations: readOnlyAnnotations("List workspaces"),
 		},
 		{
-			Name:        "tree_list",
-			Description: "List directory entries under a path in a workspace.",
+			Name: "tree_list",
+			Description: "List the entries (files and subdirectories) under a directory in a workspace. " +
+				"Use it to browse structure and discover what exists — start at the root to find orientation files like README.md. " +
+				"Returns each entry's path, type, and size; it does not return file contents (use file_read for those).",
 			InputSchema: schema(map[string]any{
 				"workspace": wsProp(),
-				"path":      map[string]any{"type": "string", "description": "Workspace-relative directory (default: root)."},
-				"recursive": map[string]any{"type": "boolean", "description": "Recurse into subdirectories."},
+				"path":      map[string]any{"type": "string", "description": "Workspace-relative directory to list (default: the workspace root)."},
+				"recursive": map[string]any{"type": "boolean", "description": "List the entire subtree instead of just the immediate entries (default false)."},
 			}),
+			Annotations: readOnlyAnnotations("List directory"),
 		},
 		{
-			Name:        "file_read",
-			Description: "Read the contents of one allowed file in a workspace.",
+			Name: "file_read",
+			Description: "Read the contents of one file in a workspace. " +
+				"Use it after locating a file with tree_list, tree_find, or tree_grep. " +
+				"Large files are truncated at a byte cap (`truncated` is set; raise `maxBytes` up to the workspace limit). Binary files are flagged, not returned as text.",
 			InputSchema: schema(map[string]any{
 				"workspace": wsProp(),
-				"path":      map[string]any{"type": "string", "description": "Workspace-relative file path."},
-				"maxBytes":  map[string]any{"type": "integer", "description": "Optional read cap (bounded by the workspace limit)."},
+				"path":      map[string]any{"type": "string", "description": "Workspace-relative path to the file to read."},
+				"maxBytes":  map[string]any{"type": "integer", "description": "Optional cap on bytes returned (still bounded by the workspace's read limit). If the file is larger, the result is truncated."},
 			}, "path"),
+			Annotations: readOnlyAnnotations("Read file"),
 		},
 		{
-			Name:        "tree_find",
-			Description: "Fuzzy-search filenames in a workspace.",
+			Name: "tree_find",
+			Description: "Find files by name when you can guess part of the filename or path (fuzzy match). " +
+				"Use this to locate a known or guessed file; use tree_grep instead to find files by their contents. Returns matching workspace-relative paths, best matches first.",
 			InputSchema: schema(map[string]any{
 				"workspace": wsProp(),
-				"query":     map[string]any{"type": "string", "description": "Fuzzy filename query."},
-				"limit":     map[string]any{"type": "integer", "description": "Max results (default 100)."},
+				"query":     map[string]any{"type": "string", "description": "Filename or path fragment to fuzzy-match (e.g. \"design\" matches docs/design.md)."},
+				"limit":     map[string]any{"type": "integer", "description": "Maximum number of results (default 100)."},
 			}, "query"),
+			Annotations: readOnlyAnnotations("Find files by name"),
 		},
 		{
-			Name:        "tree_grep",
-			Description: "Search file contents in a workspace (fixed-string by default; regex optional).",
+			Name: "tree_grep",
+			Description: "Search file contents across a workspace (literal substring by default; set fixedString=false for a regular expression). " +
+				"Use this to find where a term or phrase appears when you don't know which file holds it; use tree_find to locate files by name instead. " +
+				"Returns matching lines with path and line number; results are capped (see `truncated`) — narrow with `path` to cut noise.",
 			InputSchema: schema(map[string]any{
 				"workspace":       wsProp(),
-				"pattern":         map[string]any{"type": "string", "description": "Search pattern."},
-				"path":            map[string]any{"type": "string", "description": "Workspace-relative subtree to search (default: root)."},
-				"fixedString":     map[string]any{"type": "boolean", "description": "Literal substring search (default true). Set false for regex."},
-				"caseInsensitive": map[string]any{"type": "boolean", "description": "Case-insensitive match."},
-				"wordBoundary":    map[string]any{"type": "boolean", "description": "Match only at word boundaries."},
+				"pattern":         map[string]any{"type": "string", "description": "Text to search for. A literal substring unless fixedString=false, in which case a Go regular expression."},
+				"path":            map[string]any{"type": "string", "description": "Workspace-relative subtree to limit the search to (default: the whole workspace). Narrow this to cut noise and avoid truncation."},
+				"fixedString":     map[string]any{"type": "boolean", "description": "Literal substring search (default true). Set false to treat `pattern` as a regular expression."},
+				"caseInsensitive": map[string]any{"type": "boolean", "description": "Case-insensitive match (default false)."},
+				"wordBoundary":    map[string]any{"type": "boolean", "description": "Match only at word boundaries (default false)."},
 			}, "pattern"),
+			Annotations: readOnlyAnnotations("Search file contents"),
 		},
 		{
-			Name:        "git_status",
-			Description: "Read-only git status (branch + per-file codes) for a git-repo workspace.",
+			Name: "git_status",
+			Description: "Show read-only git status — current branch and per-file change codes — for a workspace that is a git repository (otherwise returns NOT_A_GIT_REPO). " +
+				"Orientation only: it neither reads file contents nor modifies anything.",
 			InputSchema: schema(map[string]any{
 				"workspace": wsProp(),
 			}),
+			Annotations: readOnlyAnnotations("Git status"),
 		},
 	}
 }
@@ -279,7 +306,17 @@ type fileReadResult struct {
 	Content   string `json:"content"`
 	Truncated bool   `json:"truncated"`
 	Binary    bool   `json:"binary"`
+	Notice    string `json:"notice,omitempty"`
 }
+
+// Steering notices attached when a result is capped, so the model knows how to
+// get the rest instead of treating the partial result as complete (per the
+// truncation-messaging guidance in docs/design.md).
+const (
+	fileTruncatedNotice = "Output truncated at the byte cap. Raise `maxBytes` (up to the workspace limit) or read a narrower section of the file."
+	grepTruncatedNotice = "Results truncated at the match cap. Narrow the search: set `path` to a subtree, use a more specific `pattern`, or add `wordBoundary`."
+	findTruncatedNotice = "Results truncated at the result cap. Refine `query` to be more specific, or raise `limit`."
+)
 
 func (s *Server) fileRead(args json.RawMessage) (any, audit.ToolEvent, error) {
 	var a fileReadArgs
@@ -344,6 +381,9 @@ func (s *Server) fileRead(args json.RawMessage) (any, audit.ToolEvent, error) {
 	binary := bytes.IndexByte(head, 0) >= 0
 
 	res := fileReadResult{Path: clean, Truncated: truncated, Binary: binary}
+	if truncated {
+		res.Notice = fileTruncatedNotice
+	}
 	if !binary {
 		res.Content = string(data)
 		ev.Bytes = len(data)
@@ -373,6 +413,9 @@ func (s *Server) treeFind(args json.RawMessage) (any, audit.ToolEvent, error) {
 	res, err := search.Find(ws.Root, ws.Policy, ws.Ignore, a.Query, a.Limit)
 	if err != nil {
 		return nil, ev, mapPathError(err)
+	}
+	if res.Truncated {
+		res.Notice = findTruncatedNotice
 	}
 	ev.Matches = len(res.Files)
 	return res, ev, nil
@@ -424,6 +467,9 @@ func (s *Server) treeGrep(args json.RawMessage) (any, audit.ToolEvent, error) {
 	}, ws.Grep.Workers, ws.Grep.MaxMatches)
 	if err != nil {
 		return nil, ev, invalidPattern(err)
+	}
+	if res.Truncated {
+		res.Notice = grepTruncatedNotice
 	}
 	ev.Matches = len(res.Matches)
 	return res, ev, nil

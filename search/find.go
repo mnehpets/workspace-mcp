@@ -11,8 +11,12 @@ import (
 )
 
 // FindResult lists matching workspace-relative file paths, best matches first.
+// Truncated is set when more files matched than the limit returned; Notice
+// carries an optional steering hint (set by the caller) for that case.
 type FindResult struct {
-	Files []string `json:"files"`
+	Files     []string `json:"files"`
+	Truncated bool     `json:"truncated,omitempty"`
+	Notice    string   `json:"notice,omitempty"`
 }
 
 // Find returns files whose name/path fuzzily matches query, filtered by policy
@@ -55,7 +59,7 @@ func Find(root *fsroot.Root, pol *policy.Policy, ig *grrep.IgnoreSet, query stri
 	for i := 0; i < len(hits) && i < limit; i++ {
 		out = append(out, hits[i].path)
 	}
-	return &FindResult{Files: out}, nil
+	return &FindResult{Files: out, Truncated: len(hits) > limit}, nil
 }
 
 // fuzzyScore returns a relevance score and whether query matches target.
