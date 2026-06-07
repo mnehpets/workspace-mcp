@@ -1,0 +1,21 @@
+git-tree-mcp
+Copyright 2026 Stephen Ma
+
+This product includes software developed by third parties under the Apache
+License, Version 2.0.
+
+--------------------------------------------------------------------------------
+github.com/bep/grrep
+Copyright 2026 Bjørn Erik Pedersen
+Licensed under the Apache License, Version 2.0.
+
+The files in the grrep/ package of this repository are derived from grrep:
+  - grrep/match.go   — copied verbatim from grrep's internal/match.go
+  - grrep/ignore.go  — copied verbatim from grrep's internal/ignore.go
+  - grrep/scan.go    — adapted from grrep's main.go scan core, modified to emit
+                       structured matches instead of writing to stdout and to
+                       open files through an os.Root sandbox.
+
+The original SPDX license headers are retained in those files. See
+https://github.com/bep/grrep for the upstream source and full license text.
+--------------------------------------------------------------------------------
