@@ -84,7 +84,7 @@ This is the security core, so be precise about it:
   within the root **even in the presence of symlinks**, and resist TOCTOU
   races — a symlink inside the tree that points at `/etc/passwd` cannot be
   followed out. **All filesystem access goes through a single `*os.Root` opened
-  once at startup.** We are on Go 1.25, so this is available.
+  once at startup.** We are on Go 1.26, so this is available.
 
 ### 5.1 Where `os.Root` is load-bearing — and where it isn't
 
@@ -117,7 +117,7 @@ same boundary. So: anything reading content that the model can *aim* — through
 
 ## 6. Technology stack
 
-Go (`go 1.25`), built on **`github.com/mnehpets/http`**.
+Go (`go 1.26`), built on **`github.com/mnehpets/http`**.
 
 From that library (confirmed by reading source):
 
@@ -292,7 +292,15 @@ resolved through that workspace's `os.Root`. Per-workspace policy/limits (§7) a
 
 ### 8.1 `workspace_list`
 List configured workspaces (so the model can discover them). No params →
-`{ "workspaces": [{ "name", "isGitRepo" }] }`. Does not expose roots.
+`{ "workspaces": [{ "name", "isGitRepo", "description", "wellKnownFiles" }] }`.
+Does not expose roots.
+- **`description`** — what the tree is *for*, so the model can pick by intent on
+  the first hop. Resolved at startup: an optional per-workspace `description` in
+  config (authoritative) → else the first section of the tree's `README.md` (the
+  text under the top heading, trimmed to a small cap) → else absent. See task §12.12.
+- **`wellKnownFiles`** — which agent/orientation files exist at the tree root, of
+  a fixed set (`README.md`, `AGENTS.md`, `CLAUDE.md`), e.g.
+  `["README.md", "CLAUDE.md"]`. Presence only — metadata, not content. See §12.12.
 
 ### 8.2 `tree_list`
 List entries under a directory. `{ "workspace": "default", "path": "docs",
@@ -301,10 +309,17 @@ List entries under a directory. `{ "workspace": "default", "path": "docs",
 (grrep/`gogitignore`) when its `respectGitignore` is set (and by its policy globs).
 
 ### 8.3 `file_read`
-Read one allowed file. `{ "workspace": "default", "path": "docs/x.md",
-"maxBytes": 100000 }` → `{ "path", "content", "truncated", "binary" }`. Opens via
-`Root.Open`; enforces the workspace's `read.maxBytes`; detects binary and flags
-or refuses it.
+Read one allowed file, optionally a line range. `{ "workspace": "default",
+"path": "docs/x.md", "maxBytes": 100000, "startLine": 1, "endLine": 100 }` →
+`{ "path", "content", "truncated", "binary", "startLine", "endLine", "totalLines" }`.
+Opens via `Root.Open`; enforces the workspace's `read.maxBytes`; detects binary and
+flags or refuses it.
+- **`startLine` / `endLine`** (optional, 1-based, inclusive) — return only that
+  span instead of the whole file; either may be omitted (open-ended toward the
+  start/end). The response echoes the resolved `startLine`/`endLine` and reports
+  `totalLines` so the model can page (e.g. request the next 100). `maxBytes` still
+  caps the *returned* span. Line ranges apply to text only; a binary file is
+  flagged/refused as today regardless of range. See task §12.13.
 
 ### 8.4 `tree_find`
 Fuzzy filename search. `{ "workspace": "default", "query": "scale-out" }` →
@@ -356,7 +371,10 @@ Server to claude.ai; sandboxed-FS client internally. Via the jsonrpc registry:
 ### 9.1 Transport
 Streamable HTTP first: `POST /mcp` (JSON-RPC via `jsonrpc.Endpoint`) and
 `GET /mcp` (SSE via `SSERenderer`). Add legacy SSE transport only if claude.ai
-requires it.
+requires it. A local **stdio** transport is also available (`-stdio`) for
+subprocess clients (MCP Inspector, Claude Code/Desktop) — same dispatch and tool
+gating, no HTTP listener, no bearer (trusted local pipe). See §16 for the planned
+native-stdio cleanup.
 
 ---
 
@@ -404,10 +422,10 @@ logged.
 ## 11. Repository layout
 
 > The directory is still named `vscode-mcp-shim` from earlier iterations. Rename
-> to e.g. `git-tree-mcp` when convenient (out of MVP scope).
+> to e.g. `workspace-mcp` when convenient (out of MVP scope).
 
 ```text
-git-tree-mcp/
+workspace-mcp/
   PLAN.md
   README.md
   NOTICE                   # attribution for vendored grrep (Apache-2.0)
@@ -463,112 +481,112 @@ spine — nothing that serves content to the model ships before their escape/pol
 tests pass.
 
 ### 1. Scaffold, config, secrets, health
-- [ ] Module + directory skeleton per §11; `go build ./...` clean.
-- [ ] `config/`: load the `-config` YAML (default `./config.yaml`) into a typed
+- [x] Module + directory skeleton per §11; `go build ./...` clean.
+- [x] `config/`: load the `-config` YAML (default `./config.yaml`) into a typed
       struct via `gopkg.in/yaml.v3` with `KnownFields(true)`. Supports a
       `workspaces` list.
-- [ ] `config/secrets.go`: `godotenv` reads `-env` (default `./.env`) into
+- [x] `config/secrets.go`: `godotenv` reads `-env` (default `./.env`) into
       a `map[string]string`; overlay `os.Environ()` (OS **overrides** dotenv);
       resolve each `{ env: NAME }` config reference (e.g. `auth.bearerToken`) — a
       missing/empty referenced var is a startup error.
-- [ ] Validate: ≥ 1 workspace, unique names, a `default` exists; each `root` is an
+- [x] Validate: ≥ 1 workspace, unique names, a `default` exists; each `root` is an
       existing dir; port in range; resolved `bearerToken` ≥ 32 bytes; globs compile.
-- [ ] `audit/`: `slog` logger that redacts the bearer token and never logs file
+- [x] `audit/`: `slog` logger that redacts the bearer token and never logs file
       contents.
-- [ ] `cmd/shim`: wire config + secrets + logger; serve `GET /healthz` → `{"ok":true}`.
-- [ ] `config.example.yaml` + `.env.example` committed; `config.yaml` + `.env`
+- [x] `cmd/shim`: wire config + secrets + logger; serve `GET /healthz` → `{"ok":true}`.
+- [x] `config.example.yaml` + `.env.example` committed; `config.yaml` + `.env`
       gitignored.
 - **Done when:** `go run ./cmd/shim -config config.yaml -env .env` serves
   `/healthz`; malformed/unknown-key config or an unresolved secret fails fast with
   a clear error.
 
 ### 2. Bearer auth
-- [ ] `auth/`: constant-time bearer `endpoint.Processor`; 401 on missing/invalid
+- [x] `auth/`: constant-time bearer `endpoint.Processor`; 401 on missing/invalid
       with no hint as to which.
-- [ ] Wire it ahead of every route except `/healthz`.
-- [ ] Tests: missing / wrong / valid token; assert the token never appears in logs.
+- [x] Wire it ahead of every route except `/healthz`.
+- [x] Tests: missing / wrong / valid token; assert the token never appears in logs.
 - **Done when:** unauthenticated requests get 401, valid passes, redaction test green.
 
 ### 3. Sandbox core — `fsroot` over `os.Root` + workspace registry (the spine)
-- [ ] `fsroot/`: open a tree's `root` with `os.OpenRoot`; expose safe
+- [x] `fsroot/`: open a tree's `root` with `os.OpenRoot`; expose safe
       `Open`/`Stat`/`ReadDir`/walk taking workspace-relative paths.
-- [ ] `workspace/`: build a registry at startup — one entry per configured
+- [x] `workspace/`: build a registry at startup — one entry per configured
       workspace holding `{*os.Root, policy, IgnoreSet, isGitRepo}` (git-ness via
       `gitaware.Detect`). Lookup by name; `UNKNOWN_WORKSPACE` otherwise.
-- [ ] Reject model paths that are absolute or contain `..` before resolution;
+- [x] Reject model paths that are absolute or contain `..` before resolution;
       everything else resolves through that workspace's `*os.Root`.
-- [ ] **`fsroot_escape_test.go` (the centerpiece):** absolute path rejected; `..`
+- [x] **`fsroot_escape_test.go` (the centerpiece):** absolute path rejected; `..`
       rejected; in-tree symlink → `/etc/passwd` cannot read it; in-tree symlink to
       another in-tree file behaves; concurrent-rename/TOCTOU cannot escape.
-- [ ] `workspace_test.go`: unknown workspace rejected; a path valid in one
+- [x] `workspace_test.go`: unknown workspace rejected; a path valid in one
       workspace cannot reach another's tree.
 - **Done when:** every escape test fails to read anything outside the root, and
   cross-workspace access is impossible. The boundary is ours and provable.
 
 ### 4. Path policy
-- [ ] `policy/`: `policy.allowGlobs` allow + `policy.blockGlobs` deny (deny always
+- [x] `policy/`: `policy.allowGlobs` allow + `policy.blockGlobs` deny (deny always
       wins); dotfile rule; shares the absolute/`..` rejection with fsroot.
-- [ ] Tests: allowed globs pass; `.env`, `.git/**`, keys, `node_modules` blocked;
+- [x] Tests: allowed globs pass; `.env`, `.git/**`, keys, `node_modules` blocked;
       `docs/../.env` blocked; dotfiles handled per rule.
 - **Done when:** policy tests green; a path must clear **both** fsroot and policy
   to be served.
 
 ### 5. Search — vendor & adapt grrep
-- [ ] `grrep/` package: `match.go` **verbatim** (SPDX retained); scan core adapted
+- [x] `grrep/` package: `match.go` **verbatim** (SPDX retained); scan core adapted
       to emit structured `{path,line,text}`; `IgnoreSet` (gogitignore); add `NOTICE`.
-- [ ] `search/grep.go`: `fastwalk` traversal with `.git`/dotfile skip, the
+- [x] `search/grep.go`: `fastwalk` traversal with `.git`/dotfile skip, the
       workspace's `IgnoreSet` + policy filter, NUL-byte binary skip, **each leaf
       opened via `os.Root`**, worker pool sized by the workspace's `grep.workers`,
       cap `grep.maxMatches`.
-- [ ] `search/find.go`: fuzzy filename search over the filtered tree.
-- [ ] Tests: literal + regex hit; `fixedString`/`caseInsensitive`/`wordBoundary`;
+- [x] `search/find.go`: fuzzy filename search over the filtered tree.
+- [x] Tests: literal + regex hit; `fixedString`/`caseInsensitive`/`wordBoundary`;
       ignore + policy respected; binary skipped; cap → `truncated`.
 - **Done when:** grep/find return correct in-sandbox results, no external binary.
 
 ### 6. Git-awareness — go-git
-- [ ] `gitaware/`: `Detect(root)` (is it a git repo?); `git_status` via
+- [x] `gitaware/`: `Detect(root)` (is it a git repo?); `git_status` via
       `Worktree().Status()` + branch from `repo.Head()`; tracked-file enumeration
       via index/worktree.
-- [ ] Tests against a temp repo with staged / unstaged / untracked files, and a
+- [x] Tests against a temp repo with staged / unstaged / untracked files, and a
       non-git tree (Detect false → `git_status` yields `NOT_A_GIT_REPO`).
 - **Done when:** status returns branch + per-file codes on git workspaces and
   `NOT_A_GIT_REPO` on others; no `git` binary used.
 
 ### 7. MCP server — handshake + tool-list invariant
-- [ ] `mcp/`: register `initialize`, `notifications/initialized`, `tools/list`,
+- [x] `mcp/`: register `initialize`, `notifications/initialized`, `tools/list`,
       `tools/call` on the jsonrpc endpoint (slash names via `_ jsonrpc:"…"`).
-- [ ] `initialize` returns protocol version + `{capabilities:{tools:{}}}`; reject
+- [x] `initialize` returns protocol version + `{capabilities:{tools:{}}}`; reject
       unsupported versions.
-- [ ] `tools/list` returns only `workspace_list` + `tree_*` / `file_*` / `git_*`
+- [x] `tools/list` returns only `workspace_list` + `tree_*` / `file_*` / `git_*`
       with JSON Schemas (each tool but `workspace_list` includes a `workspace` param).
-- [ ] `mcp_list_test.go`: no other surface leaks; `tools/call` rejects unknown
+- [x] `mcp_list_test.go`: no other surface leaks; `tools/call` rejects unknown
       tool names.
 - **Done when:** an MCP client completes the handshake and sees only intended tools.
 
 ### 8. Read tools wired through `tools/call`
-- [ ] Implement `workspace_list` / `tree_list` / `file_read` / `tree_find` /
+- [x] Implement `workspace_list` / `tree_list` / `file_read` / `tree_find` /
       `tree_grep` / `git_status`, each (except `workspace_list`): bearer (done) →
       name allowlist → schema validate → resolve `workspace` → per-workspace
       enablement → path policy → fsroot/search/gitaware → size/count limits →
       audit log.
-- [ ] Map failures to the error spec (§13).
-- [ ] Integration test: two workspaces (one git, one not) + sample files + a
+- [x] Map failures to the error spec (§13).
+- [x] Integration test: two workspaces (one git, one not) + sample files + a
       symlink escape + a `.env`; `initialize` → `tools/list` → `workspace_list` →
       `tree_list` → `file_read` → `tree_grep` → `git_status`; allowed succeed,
       escapes/blocked/unknown-workspace/non-git fail; audit records present.
 - **Done when:** all read tools work end-to-end and the integration test is green.
 
 ### 9. Transport + ngrok
-- [ ] `POST /mcp` (jsonrpc) + `GET /mcp` (SSE via `SSERenderer`), Streamable-HTTP.
-- [ ] Docs: `ngrok http 127.0.0.1:<server.port>` exposes only this server; reserved
+- [x] `POST /mcp` (jsonrpc) + `GET /mcp` (SSE via `SSERenderer`), Streamable-HTTP.
+- [x] Docs: `ngrok http 127.0.0.1:<server.port>` exposes only this server; reserved
       domain + edge auth; example `ngrok.yml`. Never expose anything else.
 - **Done when:** reachable through the tunnel; unauthorized requests fail at both
   edge and server.
 
 ### 10. claude.ai connector + docs
-- [ ] README: add as a custom connector (URL + bearer), the safety model, the
+- [x] README: add as a custom connector (URL + bearer), the safety model, the
       read-only guarantee, example prompts, shutdown.
-- [ ] Manual verify: a live claude.ai session lists / reads / greps the repo and
+- [x] Manual verify: a live claude.ai session lists / reads / greps the repo and
       **cannot** reach any write/shell tool.
 - **Done when:** a real claude.ai session drives the read tools end-to-end. ← MVP.
 
@@ -587,6 +605,86 @@ The payoff of going standalone. Do **not** start until sections 1–10 are green
 - **Done when:** patches apply deterministically and reversibly via Git; conflicts
   and out-of-policy/escape targets are refused. Deterministic, no second LLM.
 
+### 12. Richer `workspace_list` — purpose + well-known files
+Independent of the patch task; can land any time after MVP (§8.1). Promotes the
+"Enrich workspace descriptions" and (partly) "Repo manifest" bullets from §16.
+- [ ] Config: add an optional `description` string per workspace (parsed by
+      `config/`; `KnownFields(true)` already in place). Discouraged-but-allowed to
+      omit. No secret handling.
+- [ ] Registry (`workspace/`): at startup resolve a `description` per workspace —
+      config value if set, else the first section of the tree's `README.md` (text
+      under the first heading, whitespace-collapsed, trimmed to a small char cap),
+      else empty. Read the README **through the workspace's `os.Root` + policy**
+      (it's content); a blocked/missing README simply yields no description.
+- [ ] Registry: detect which of a fixed set — `README.md`, `AGENTS.md`,
+      `CLAUDE.md` — exist at the tree root (presence only, via `Root.Stat`).
+      Compute once at startup; store on the registry entry.
+- [ ] `mcp/`: extend `workspace_list`'s result + JSON Schema to include
+      `description` (string, omitempty) and `wellKnownFiles` (string array). Still
+      no params; still never exposes roots.
+- [ ] Optionally fold `description` into the `workspace` enum text on the other
+      tools so the model picks by intent on the first hop (the §16 cousin).
+- [ ] Tests: config description wins over README; README-derived fallback parses
+      the first section only and respects the cap; policy-blocked README yields no
+      description; `wellKnownFiles` reflects exactly the present subset.
+- **Done when:** `workspace_list` returns a useful per-workspace `description` and
+  an accurate `wellKnownFiles` list, sourced config-first then README, with no root
+  disclosure and no content leak past policy.
+
+### 13. Ranged `file_read` — line spans
+Independent; can land any time after MVP (§8.3). A long file shouldn't force a
+whole-file read.
+- [ ] `mcp/` + `file_read`: add optional `startLine` / `endLine` (1-based,
+      inclusive) to the args + JSON Schema; either omittable (open-ended).
+- [ ] Implementation: open via `os.Root` as today, then return only the requested
+      line span. Apply `read.maxBytes` to the **returned span**; preserve binary
+      detection/refusal (ranges are text-only). Count and return `totalLines`; echo
+      the resolved `startLine`/`endLine`; set `truncated` if `maxBytes` clipped the
+      span.
+- [ ] Validate the range: `startLine`/`endLine` ≥ 1 and `startLine` ≤ `endLine`
+      when both given; out-of-bounds clamps to the file rather than erroring (an
+      empty span past EOF returns empty content with the true `totalLines`).
+- [ ] Tests: full-file read unchanged when range omitted; `1-100` returns exactly
+      those lines; open-ended `startLine`-only and `endLine`-only; past-EOF clamps;
+      `maxBytes` clips a span → `truncated`; binary still flagged regardless of range.
+- **Done when:** `file_read` can return an exact line span with correct
+      `totalLines`/`truncated`, behaves identically to today when no range is given,
+      and never bypasses policy, `os.Root`, or binary handling.
+
+### 14. Tag / frontmatter index — corpus orientation
+A cheap, corpus-wide table of contents the model can't build without reading every
+file. Orientation, not analysis — belongs with the §12.12 description family.
+- [ ] Parse YAML frontmatter from text files (markdown `---` blocks) via a pure-Go
+      parser (`gopkg.in/yaml.v3`, with `yuin/goldmark` if richer markdown parsing is
+      wanted). Read each file **through the workspace's `os.Root` + policy + ignore**.
+- [ ] Aggregate across the workspace: the set of tags and frontmatter field names,
+      and which files carry each. Bound the walk like `tree_grep` (skip binary,
+      respect `IgnoreSet` + policy, cap files scanned).
+- [ ] Expose a `tree_metadata` (tree-wide) tool: `{ "workspace": "default" }` →
+      `{ "tags": [{ "tag", "files": [...] }], "fields": [{ "name", "files": [...] }] }`.
+      Optionally filter to files matching a tag/field so the model can narrow.
+- [ ] Tests: frontmatter parsed; rollup correct; blocked/ignored/binary files
+      excluded; no root disclosure.
+- **Done when:** `tree_metadata` returns an accurate, policy-respecting rollup of
+      tags/frontmatter across a workspace, built without the model reading every file.
+
+### 15. Raw-binary delivery in `file_read`
+Hand raw bytes to claude.ai/ChatGPT and let *them* parse PDFs/images — the server
+extracts nothing (§8.3). The model can't reach the local bytes; that's the one
+thing only the server can do.
+- [ ] `file_read`: for non-text/binary files, instead of refusing, return the raw
+      bytes as a base64 blob (or an MCP resource), with a detected MIME type:
+      `{ "path", "content", "encoding": "base64", "mimeType", "truncated" }`.
+      Keep the text path (and `binary: true` flag) for callers that want refusal.
+- [ ] Enforce `read.maxBytes`, `os.Root`, and policy exactly as for text reads;
+      binary delivery never widens the sandbox or policy.
+- [ ] Add an arg to opt into binary (e.g. `allowBinary: true`) so existing text
+      callers keep today's refuse-binary behavior by default.
+- [ ] Tests: a PDF/image returns base64 + mimeType under the byte cap; oversize →
+      `truncated`; policy/`os.Root` still gate the path; text reads unchanged.
+- **Done when:** `file_read` can deliver raw binary content for the platform to
+      parse, under the same byte/policy/sandbox limits, without server-side extraction.
+
 ---
 
 ## 13. Failure modes & error spec
@@ -601,6 +699,8 @@ The payoff of going standalone. Do **not** start until sections 1–10 are green
 - **Oversize read** → truncated content + `"truncated": true`.
 - **Bad regex pattern** (`fixedString: false`) → `INVALID_PATTERN` with the compile
   error; no walk performed.
+- **Bad line range** (task 13: `startLine`/`endLine` < 1, or `startLine` >
+  `endLine`) → `INVALID_RANGE`; out-of-bounds-but-ordered ranges clamp instead.
 - **Patch context mismatch** (task 11) → `PATCH_CONFLICT`, "re-read the file and
   retry"; no partial write.
 
@@ -636,6 +736,27 @@ The payoff of going standalone. Do **not** start until sections 1–10 are green
 ## 16. Future enhancements (each its own decision)
 
 - Read-only `git_diff` (working-tree diff) for orientation.
+- **Read-only `git_log` (commit history).** Surface recent commit history for
+  orientation, via go-git's `repo.Log(&git.LogOptions{...})` (still pure Go, no
+  binary). Two scopes from one tool:
+  - **Whole-workspace:** `{ "workspace": "default", "limit": 50 }` → newest-first
+    `{ "commits": [{ "hash", "author", "date", "subject" }] }`.
+  - **Per-file:** add `"path": "docs/x.md"` → only commits that touched that path
+    (`LogOptions.FileName` / `PathFilter`), so the model can ask "how did this file
+    evolve?". The `path` rides the workspace's `os.Root` + policy like every other
+    path arg; a blocked/absent path → `POLICY_DENIED`/`NOT_FOUND` (history is
+    metadata, but gate the path the same way). Git-repo workspaces only, else
+    `NOT_A_GIT_REPO`. Cap commits (`limit`, default + max); never expose full diffs
+    here (that's `git_diff`). Optionally include short stats per commit.
+- **Read-only `git_blame` (line authorship).** Per-line last-touched info for one
+  file, via go-git `git.Blame(commit, path)`:
+  `{ "workspace": "default", "path": "docs/x.md" }` →
+  `{ "path", "lines": [{ "line", "hash", "author", "date" }] }` (optionally the
+  line text, subject to `read.maxBytes`). Honors the same `os.Root` + policy +
+  binary handling as `file_read`; git-repo workspaces only, else `NOT_A_GIT_REPO`.
+  Composes naturally with ranged `file_read` (§12.13) — blame a span, then read it.
+  Note go-git blame can be heavy on large/long-history files; bound it (line cap,
+  maybe a size guard) and document the cost.
 - Per-client tokens (scoped to specific workspaces), rotation without restart,
   session expiry.
 - Rate limits and a per-session byte budget.
@@ -643,3 +764,35 @@ The payoff of going standalone. Do **not** start until sections 1–10 are green
 - Optional symbol search — only if it earns its weight; pull an LSP/ctags library
   per-feature, not a whole running program.
 - Upstream the bearer `Processor` into `github.com/mnehpets/http`.
+- **Native stdio dispatch in `jsonrpc`.** The `-stdio` transport currently reuses
+  the HTTP path by driving the handler in-process per message (a synthetic
+  `httptest` request/recorder round-trip in `cmd/shim`). It works and reuses all
+  tool gating verbatim, but routes stdio through an HTTP shim. Improve
+  `github.com/mnehpets/http`'s `jsonrpc` to expose a transport-agnostic dispatch
+  entry point (e.g. `HandleMessage(ctx, []byte) ([]byte, error)`, with `nil` for
+  notifications) so a stdio server can call it directly with no `net/http` /
+  `httptest` involvement. Then rewrite `serveStdio` against that API and drop the
+  in-process HTTP round-trip. (Not started — deliberate; do after MVP.)
+- **Discovery in a large repo.** `tree_grep`/`tree_find` are lexical; in a big
+  tree the model can't easily find the *right* file without already knowing a
+  term. Add a higher-level discovery aid. Two candidate approaches (pick one, or
+  offer both):
+  - **Repo manifest.** Honor a checked-in manifest (e.g. `.workspace-mcp.yaml` or
+    a `MANIFEST.md`) that maps paths/areas to human descriptions; expose it via a
+    `workspace_overview` (or `tree_manifest`) tool so the model gets an annotated
+    map before drilling in. Cheap, deterministic, author-controlled, no index to
+    maintain — but only as good/fresh as the hand-written doc.
+  - **Semantic search.** Build/maintain an embedding index over allowed files and
+    add a `tree_search` tool that ranks by meaning, not substring. Far better
+    recall on "where is X handled?" queries — but needs an embedding model
+    (local or API), an index to build/refresh/invalidate (mind the os.Root +
+    policy + ignore filters so nothing blocked is ever indexed), and storage.
+    Heavier; keep it optional and per-workspace.
+  Likely start with the manifest (low cost, immediate UX win) and treat semantic
+  search as a later, opt-in upgrade. (Not started.)
+- **Enrich workspace descriptions.** *Promoted to task §12.12* (config/README-derived
+  `description` + `wellKnownFiles` on `workspace_list`). What remains here as future
+  work: the in-tree **repo manifest** half (the `tree_manifest`/`workspace_overview`
+  surface above) and folding `description` into the per-tool `workspace` enum text,
+  if §12.12's optional step isn't taken. (If we don't enrich it, reconsider whether
+  `workspace_list` earns its slot at all.)
