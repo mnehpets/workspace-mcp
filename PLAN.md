@@ -618,7 +618,9 @@ Independent of the patch task; can land any time after MVP (§8.1). Promotes the
       (it's content); a blocked/missing README simply yields no description.
 - [ ] Registry: detect which of a fixed set — `README.md`, `AGENTS.md`,
       `CLAUDE.md` — exist at the tree root (presence only, via `Root.Stat`).
-      Compute once at startup; store on the registry entry.
+      Compute once at startup; store on the registry entry. (Task §12.17 later
+      broadens this to a server-maintained recognizer — auto-detecting common doc/
+      notes conventions like `index.md` by convention, still no config.)
 - [ ] `mcp/`: extend `workspace_list`'s result + JSON Schema to include
       `description` (string, omitempty) and `wellKnownFiles` (string array). Still
       no params; still never exposes roots.
@@ -684,6 +686,69 @@ thing only the server can do.
       `truncated`; policy/`os.Root` still gate the path; text reads unchanged.
 - **Done when:** `file_read` can deliver raw binary content for the platform to
       parse, under the same byte/policy/sandbox limits, without server-side extraction.
+
+### 16. Orientation & tool-selection eval (claude.ai)
+Validate that the orientation work (server `instructions`, the reworked tool
+descriptions, the read-only annotations, the `workspace_list` "start here"
+framing) actually changes model behavior — and settle the open question of
+whether claude.ai honors the `instructions` field at all. Functional verification
+already exists (§10, §14); this is the *behavioral* eval the research prescribes
+("hit-rate" testing), not a correctness check.
+- [ ] Author a small fixed set (~6–10) of sample claude.ai prompts spanning the
+      intended flows: discover workspaces, orient (read README), locate-by-name vs
+      locate-by-content, ranged read of a large file, git status. Keep them in the
+      repo (e.g. `test/eval/prompts.md`) so the set is stable and re-runnable.
+- [ ] For each, record whether the live session (a) picks the *right* tool and
+      (b) **orients first** (calls `workspace_list` / reads README before drilling
+      in) rather than guessing paths. This is manual against a real connector;
+      capture pass/fail + notes, not an automated harness.
+- [ ] **Instructions probe:** put a distinctive, falsifiable directive in the
+      `instructions` string (e.g. a specific first-call convention) and check
+      whether behavior reflects it — the only practical way to tell if claude.ai
+      surfaces `instructions`. Record the verdict; if ignored, lean harder on the
+      description/`workspace_list` layer and note it in [docs/design.md §5.5].
+- [ ] Feed failures back into the description/annotation/`instructions` wording and
+      re-run; iterate until the hit-rate is acceptable. Treat the prose as prompts
+      under test, per the writing-tools-for-agents guidance.
+- **Done when:** the prompt set runs against a live claude.ai connector with a
+      recorded hit-rate, the instructions-honored question is answered, and any
+      wording fixes from the first pass have landed. Pairs with the §10 / §14 live
+      checks (folds into §12.10's verification rather than duplicating it).
+
+### 17. Auto-detect orientation files by convention (no config)
+Task §12.12 detects a **fixed three** — `README.md`, `AGENTS.md`, `CLAUDE.md`.
+Those are coding-agent conventions; this server's audience is research/notes/docs/
+papers, where the orientation file is often `index.md`, an `_index.md`, a table of
+contents, or `ABOUT`/`OVERVIEW`, and AGENTS/CLAUDE are usually absent. The fix is
+**not** a config knob (every user would hand-maintain a list that rots on rename);
+it's a broader **server-maintained recognizer** so a freshly-pointed workspace
+just works. Depends on §12.12 landing first.
+- [ ] Registry (`workspace/`): replace the hardcoded three with a built-in,
+      curated stem set recognized **case-insensitively and extension-agnostically**
+      at the tree root only — e.g. `readme`, `index`, `_index`, `contents`, `toc`,
+      `overview`, `about`, `agents`, `claude`. Probe via `Root.Stat`/a single root
+      `ReadDir`, presence only (metadata, not content), each candidate gated by the
+      workspace's policy/`os.Root` exactly as in §12.12.
+- [ ] Return the actual filenames found (so `README.rst` or `index.md` surface as
+      themselves), newest-convention-first by a fixed priority order; cap the list
+      (e.g. ≤ 5) so a noisy root can't flood `workspace_list`.
+- [ ] Description fallback (§12.12) follows the same priority: derive the
+      `description` from the highest-priority detected orientation file's first
+      section, not `README.md` specifically.
+- [ ] `mcp/`: no schema change — `workspace_list`'s `wellKnownFiles` already
+      carries whatever subset is present (§12.12).
+- [ ] Keep the recognizer a **closed, server-owned list** — deliberately not
+      user-extensible. If a real corpus needs a name we don't recognize, add it to
+      the built-in set (a one-line code change with a test), don't add a config
+      surface. Revisit only if that proves insufficient in practice.
+- [ ] Docs: note in [docs/design.md §5.5] that orientation files are auto-detected
+      by convention (and *why* it's convention-over-config).
+- [ ] Tests: each recognized stem/extension detected; case-insensitivity; non-root
+      matches ignored; policy-blocked names omitted; the cap holds; priority order
+      drives both the list and the description fallback.
+- **Done when:** a workspace points the model at its real orientation file(s)
+      without any per-workspace configuration, across common doc/notes conventions,
+      staying presence-only and policy-gated.
 
 ---
 
