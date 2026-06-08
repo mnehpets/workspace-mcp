@@ -54,7 +54,12 @@ else reaches the filesystem.
 Do **not** build: a remote shell or command runner; arbitrary filesystem write;
 Git automation (commit/push/branch/rebase/reset); a second LLM / agent loop;
 LSP/symbol indexing; Project-Knowledge sync; a multi-user SaaS. Single-user local
-developer tool.
+developer tool. **No structured-metadata query** (field-scoped predicates over YAML
+frontmatter, database-style facets): it serves querying of a *known* schema, which
+contradicts this server's orient-an-*unfamiliar*-tree premise — content search already
+finds metadata values as plain text. If ever needed it's a separate, specialised tool.
+(Surfacing the raw frontmatter block as text, or splitting matches by the `---` fence, is
+fine — that's bytes and position, not a parse or a query. See §8.4.)
 
 ---
 
@@ -171,7 +176,7 @@ New deps (all small pure-Go libs — still **no external binary**):
 
 Ignore handling — pick **one** engine: standardize on grrep's `IgnoreSet`
 (`bep/gogitignore`: nested `.gitignore` + `.ignore`, per-dir matchers) for
-`tree_list`/`tree_find`/`tree_grep`, and use go-git **only** for `git_status` +
+`tree_search`, and use go-git **only** for `git_status` +
 tracked enumeration. One ignore notion across all read tools, not two.
 
 No heavy MCP SDK — the surface (initialize + tools/list + tools/call) is small and
@@ -298,15 +303,17 @@ Does not expose roots.
   the first hop. Resolved at startup: an optional per-workspace `description` in
   config (authoritative) → else the first section of the tree's `README.md` (the
   text under the top heading, trimmed to a small cap) → else absent. See task §12.12.
-- **`wellKnownFiles`** — which agent/orientation files exist at the tree root, of
-  a fixed set (`README.md`, `AGENTS.md`, `CLAUDE.md`), e.g.
-  `["README.md", "CLAUDE.md"]`. Presence only — metadata, not content. See §12.12.
+- **`wellKnownFiles`** — which orientation files exist at the tree root, recognized
+  by convention (case-insensitive, extension-agnostic stems: `readme`, `index`,
+  `_index`, `contents`, `toc`, `overview`, `about`, `agents`, `claude`), policy-gated,
+  priority-ordered, capped — e.g. `["README.md", "CLAUDE.md"]`. Presence only —
+  metadata, not content. See §12.12 / §12.17.
 
-### 8.2 `tree_list`
-List entries under a directory. `{ "workspace": "default", "path": "docs",
-"recursive": false }` → `{ "entries": [{ "path", "type", "size" }] }`. Backed by
-`Root`-scoped `ReadDir`/`WalkDir`, filtered by the workspace's `IgnoreSet`
-(grrep/`gogitignore`) when its `respectGitignore` is set (and by its policy globs).
+### 8.2 `tree_list` — FOLDED INTO `tree_search`
+Removed as a separate tool. A where-less `tree_search` path-glob query enumerates
+files with their `size` (e.g. `path: "*"` for the root, `"docs/**"` for a subtree),
+which is everything a directory listing offered; directory entries themselves were
+dropped (file paths already convey structure). See §8.4.
 
 ### 8.3 `file_read`
 Read one allowed file, optionally a line range. `{ "workspace": "default",
@@ -321,28 +328,51 @@ flags or refuses it.
   caps the *returned* span. Line ranges apply to text only; a binary file is
   flagged/refused as today regardless of range. See task §12.13.
 
-### 8.4 `tree_find`
-Fuzzy filename search. `{ "workspace": "default", "query": "scale-out" }` →
-`{ "files": [...] }`.
+### 8.4 `tree_search` (content search needs the workspace's `grep.enabled`)
+One tool to locate files — by path and by content — replacing the former
+`tree_find`/`tree_grep` split. The find/grep boundary encoded two match *vocabularies*
+(glob/name vs literal-or-regex content), not two tools; one tool with a path glob and
+typed content predicates expresses both, without the selection tax of two lexical tools.
+Returns a flat file list; the caller chooses whether to hydrate matched lines per hit.
+`{ "workspace": "default", "path": "docs/**/*.md",
+   "where": [ { "text": "ASC workflow", "fixedString": true } ],
+   "includeMatches": true }`
+→ `{ "files": [{ "path", "matches"?, "metadataMatches"?, "metadata"? }], "truncated" }`
+(`matches`/`metadataMatches` are each a list of `{ "line","text" }`; `metadata` is a string).
+- **`path`** — a glob selecting candidate files (boundary *and* name filter in one;
+  e.g. `docs/**/*.{md,txt}`). Omit for the whole tree. Fuzzy name matching was
+  considered and dropped: an LLM globs broad then narrows by inspecting results, so
+  typo-tolerant ranking is wasted on it — which collapses the old `query` into `path`.
+- **`where`** — content predicates over the file body, AND-combined; a file must
+  satisfy every one. Each predicate is a `text` expression + modifiers.
+  - **`fixedString: true` (default)** — literal substring (grrep `Matcher` fast path).
+  - **`fixedString: false`** — Go `regexp` with grrep's literal pre-filter.
+  - Optional `caseInsensitive` / `wordBoundary` map to grrep `MatchOpts` (`-i`/`-w`),
+    **per predicate** (not a top-level mode).
+- **`includeMatches`** (default on) — attach the matched lines (`line`,`text`) per file
+  so the caller can triage from snippets; set false for just the path list. Matches that
+  fall inside a leading `---`…`---` **frontmatter fence** come back separately as
+  `metadataMatches` (vs body `matches`), so the caller can tell a *declared* topic
+  (`tags: [california]`) from an incidental body mention. Fence detection only — **no**
+  YAML parser; it's the same boundary `includeMetadata` uses.
+- **`includeMetadata`** (default off) — attach each file's frontmatter block as **raw,
+  unparsed text** (the bytes between the leading fences) in `metadata`. The caller parses
+  it if it cares; the server hands over bytes, never a typed/queryable schema. No-op on
+  files without a fence.
+- Field-scoped *predicates* (matching within a named field) stay out of scope — see §3.
+  The server finds the fence; it never parses or queries the YAML inside it.
+Backed by the vendored grrep core (§6): `fastwalk` traversal filtered by `IgnoreSet` +
+policy globs + `.git`/dotfile skip; binary files skipped (NUL probe); each leaf opened
+via `os.Root`; worker pool sized by the workspace's `grep.workers`; capped at
+`grep.maxMatches` (`truncated: true` when hit). A pure path-glob query (no `where`)
+needs only the walk; content predicates additionally need `grep.enabled`.
 
-### 8.5 `tree_grep` (if the workspace's `grep.enabled`)
-Concurrent content search, powered by the vendored grrep core (§6).
-`{ "workspace": "default", "pattern": "ASC workflow", "path": "docs",
-"fixedString": true }` → `{ "matches": [{ "path","line","text" }], "truncated" }`.
-- **`fixedString: true` (default)** — literal substring (`Matcher` fast path).
-- **`fixedString: false`** — Go `regexp` with grrep's literal pre-filter.
-- Optional `caseInsensitive` / `wordBoundary` map to grrep's `MatchOpts` (`-i`/`-w`).
-`fastwalk` traversal filtered by `IgnoreSet` + policy globs + `.git`/dotfile skip;
-binary files skipped (NUL probe); each leaf opened via `os.Root`; worker pool
-sized by the workspace's `grep.workers`. Cap at `grep.maxMatches`
-(`truncated: true` when hit).
-
-### 8.6 `git_status` (git-repo workspaces only)
+### 8.5 `git_status` (git-repo workspaces only)
 Read-only git status for orientation, via go-git `Worktree().Status()` + current
 branch (`repo.Head()`) → `{ "branch", "files": [{ "path","status" }] }`. On a
 non-git workspace: `NOT_A_GIT_REPO`. No mutation, no `git` binary.
 
-### 8.7 Hard exclusions
+### 8.6 Hard exclusions
 Never exposed, always rejected: any write/create/delete/move/rename (until the
 deferred `tree_patch` task), any shell/command execution, any Git mutation.
 Absent from `tools/list` and rejected in `tools/call`.
@@ -448,8 +478,8 @@ workspace-mcp/
     scan.go                #   adapted: scan core → structured {path,line,text}
     ignore.go              #   IgnoreSet (gogitignore): nested .gitignore/.ignore
   search/
-    grep.go                # fastwalk + os.Root leaf-open, drives grrep core
-    find.go                # fuzzy filename search
+    search.go              # tree_search engine: path glob + where predicates,
+                           #   fastwalk + os.Root leaf-open, frontmatter-fence split
   gitaware/
     detect.go              # is this tree a git repo? (go-git PlainOpen)
     status.go              # go-git Worktree().Status() + branch
@@ -463,7 +493,7 @@ workspace-mcp/
     secrets_test.go        # env override + {env:NAME} resolution
     mcp_list_test.go       # only workspace_list/tree_*/file_*/git_* exposed
     workspace_test.go      # unknown workspace, cross-workspace isolation
-    grep_test.go
+    search_test.go         # tree_search: path glob, where predicates, fence split
 ```
 
 Packages live at the repo root, not under `internal/` — this is an application,
@@ -564,15 +594,17 @@ tests pass.
 - **Done when:** an MCP client completes the handshake and sees only intended tools.
 
 ### 8. Read tools wired through `tools/call`
-- [x] Implement `workspace_list` / `tree_list` / `file_read` / `tree_find` /
-      `tree_grep` / `git_status`, each (except `workspace_list`): bearer (done) →
+- [x] Implement `workspace_list` / `file_read` / `tree_search` / `git_status`
+      (`tree_list` + `tree_find` + `tree_grep` were consolidated into
+      `tree_search`, §8.4), each (except `workspace_list`): bearer (done) →
       name allowlist → schema validate → resolve `workspace` → per-workspace
       enablement → path policy → fsroot/search/gitaware → size/count limits →
       audit log.
 - [x] Map failures to the error spec (§13).
 - [x] Integration test: two workspaces (one git, one not) + sample files + a
       symlink escape + a `.env`; `initialize` → `tools/list` → `workspace_list` →
-      `tree_list` → `file_read` → `tree_grep` → `git_status`; allowed succeed,
+      `tree_search` (enumerate) → `file_read` → `tree_search` (content) →
+      `git_status`; allowed succeed,
       escapes/blocked/unknown-workspace/non-git fail; audit records present.
 - **Done when:** all read tools work end-to-end and the integration test is green.
 
@@ -608,25 +640,26 @@ The payoff of going standalone. Do **not** start until sections 1–10 are green
 ### 12. Richer `workspace_list` — purpose + well-known files
 Independent of the patch task; can land any time after MVP (§8.1). Promotes the
 "Enrich workspace descriptions" and (partly) "Repo manifest" bullets from §16.
-- [ ] Config: add an optional `description` string per workspace (parsed by
+- [x] Config: add an optional `description` string per workspace (parsed by
       `config/`; `KnownFields(true)` already in place). Discouraged-but-allowed to
       omit. No secret handling.
-- [ ] Registry (`workspace/`): at startup resolve a `description` per workspace —
+- [x] Registry (`workspace/`): at startup resolve a `description` per workspace —
       config value if set, else the first section of the tree's `README.md` (text
       under the first heading, whitespace-collapsed, trimmed to a small char cap),
       else empty. Read the README **through the workspace's `os.Root` + policy**
       (it's content); a blocked/missing README simply yields no description.
-- [ ] Registry: detect which of a fixed set — `README.md`, `AGENTS.md`,
+- [x] Registry: detect which of a fixed set — `README.md`, `AGENTS.md`,
       `CLAUDE.md` — exist at the tree root (presence only, via `Root.Stat`).
       Compute once at startup; store on the registry entry. (Task §12.17 later
       broadens this to a server-maintained recognizer — auto-detecting common doc/
       notes conventions like `index.md` by convention, still no config.)
-- [ ] `mcp/`: extend `workspace_list`'s result + JSON Schema to include
-      `description` (string, omitempty) and `wellKnownFiles` (string array). Still
-      no params; still never exposes roots.
+- [x] `mcp/`: extend `workspace_list`'s result to include `description` (string,
+      omitempty) and `wellKnownFiles` (string array). Still no params (no
+      inputSchema change); still never exposes roots.
 - [ ] Optionally fold `description` into the `workspace` enum text on the other
       tools so the model picks by intent on the first hop (the §16 cousin).
-- [ ] Tests: config description wins over README; README-derived fallback parses
+      *(Deferred — the optional substep; `workspace_list` already carries it.)*
+- [x] Tests: config description wins over README; README-derived fallback parses
       the first section only and respects the cap; policy-blocked README yields no
       description; `wellKnownFiles` reflects exactly the present subset.
 - **Done when:** `workspace_list` returns a useful per-workspace `description` and
@@ -636,54 +669,75 @@ Independent of the patch task; can land any time after MVP (§8.1). Promotes the
 ### 13. Ranged `file_read` — line spans
 Independent; can land any time after MVP (§8.3). A long file shouldn't force a
 whole-file read.
-- [ ] `mcp/` + `file_read`: add optional `startLine` / `endLine` (1-based,
+- [x] `mcp/` + `file_read`: add optional `startLine` / `endLine` (1-based,
       inclusive) to the args + JSON Schema; either omittable (open-ended).
-- [ ] Implementation: open via `os.Root` as today, then return only the requested
-      line span. Apply `read.maxBytes` to the **returned span**; preserve binary
+- [x] Implementation: open via `os.Root` as today, then return only the requested
+      line span. Apply the arg `maxBytes` to the **returned span** (the scan is
+      still bounded by the workspace `read.maxBytes`); preserve binary
       detection/refusal (ranges are text-only). Count and return `totalLines`; echo
       the resolved `startLine`/`endLine`; set `truncated` if `maxBytes` clipped the
-      span.
-- [ ] Validate the range: `startLine`/`endLine` ≥ 1 and `startLine` ≤ `endLine`
-      when both given; out-of-bounds clamps to the file rather than erroring (an
-      empty span past EOF returns empty content with the true `totalLines`).
-- [ ] Tests: full-file read unchanged when range omitted; `1-100` returns exactly
+      span (or the file exceeded the workspace cap).
+- [x] Validate the range: `startLine`/`endLine` ≥ 1 and `startLine` ≤ `endLine`
+      when both given (else `INVALID_RANGE`); out-of-bounds clamps to the file
+      rather than erroring (an empty span past EOF returns empty content with the
+      true `totalLines`).
+- [x] Tests: full-file read unchanged when range omitted; `2-4` returns exactly
       those lines; open-ended `startLine`-only and `endLine`-only; past-EOF clamps;
-      `maxBytes` clips a span → `truncated`; binary still flagged regardless of range.
+      `maxBytes` clips a span → `truncated`; binary still flagged regardless of
+      range; `INVALID_RANGE` on bad bounds.
 - **Done when:** `file_read` can return an exact line span with correct
       `totalLines`/`truncated`, behaves identically to today when no range is given,
       and never bypasses policy, `os.Root`, or binary handling.
 
-### 14. Tag / frontmatter index — corpus orientation
-A cheap, corpus-wide table of contents the model can't build without reading every
-file. Orientation, not analysis — belongs with the §12.12 description family.
-- [ ] Parse YAML frontmatter from text files (markdown `---` blocks) via a pure-Go
-      parser (`gopkg.in/yaml.v3`, with `yuin/goldmark` if richer markdown parsing is
-      wanted). Read each file **through the workspace's `os.Root` + policy + ignore**.
-- [ ] Aggregate across the workspace: the set of tags and frontmatter field names,
-      and which files carry each. Bound the walk like `tree_grep` (skip binary,
-      respect `IgnoreSet` + policy, cap files scanned).
-- [ ] Expose a `tree_metadata` (tree-wide) tool: `{ "workspace": "default" }` →
-      `{ "tags": [{ "tag", "files": [...] }], "fields": [{ "name", "files": [...] }] }`.
-      Optionally filter to files matching a tag/field so the model can narrow.
-- [ ] Tests: frontmatter parsed; rollup correct; blocked/ignored/binary files
-      excluded; no root disclosure.
-- **Done when:** `tree_metadata` returns an accurate, policy-respecting rollup of
-      tags/frontmatter across a workspace, built without the model reading every file.
+### 14. Consolidate search into `tree_search` — path + content
+Merge `tree_find` + `tree_grep` into one `tree_search`. The find/grep split encoded two
+match vocabularies (glob/name vs literal-or-regex content), not two tools; one tool with
+a path glob and typed content predicates expresses both, without the selection tax of two
+lexical tools. (Structured frontmatter *query* — field-scoped predicates over YAML, a
+rollup — was considered and rejected: it serves database-like querying of a *known*
+schema, contradicting this server's orient-an-*unfamiliar*-tree premise. Out of scope per
+§3. We do detect the `---` fence — purely textually — to split matches and to hand back
+the raw frontmatter block; no parsing, no querying.) See §8.4 for the contract.
+- [x] Add `tree_search`: a `path` glob (boundary *and* name filter) plus a `where` list
+      of content predicates over the file body (AND-combined), each `{ text, fixedString?,
+      caseInsensitive?, wordBoundary? }`. Reuse the grrep walk / caps / ignore / policy /
+      binary handling verbatim; content predicates require `grep.enabled`, a pure
+      path-glob query does not (`where`-less = file enumeration). No YAML parser — fence
+      detection only.
+- [x] Return controls: `includeMatches` (default on) returns matched lines per file, with
+      hits inside a leading `---`…`---` fence split out as `metadataMatches` (vs body
+      `matches`); `includeMetadata` (default off) returns the raw, unparsed frontmatter
+      block as text in `metadata`. Both rely solely on fence detection. Result is a flat
+      `{ files: [{ path, matches?, metadataMatches?, metadata? }], truncated }`.
+- [x] Drop fuzzy name matching — an LLM globs-then-narrows, so ranking is wasted on it —
+      collapsing the old `query`/`name` into the `path` glob.
+- [x] Retire `tree_find` and `tree_grep` from `tools/list` and `tools/call` (two ways to
+      do one thing is its own orientation tax); update §8, the orientation eval (§16), and
+      any tests/docs that referenced them.
+- [x] Tests: path-glob selection incl. `where`-less enumeration; body predicate == old
+      grep semantics; multi-predicate AND; fence-split `metadataMatches` vs `matches`;
+      raw-text `includeMetadata`; no-op (no fence) on fence-less files; `includeMatches`
+      toggle; blocked / ignored / binary files excluded; caps + `truncated`; no root
+      disclosure.
+- **Done when:** a single `tree_search` locates files by path and body content, splits
+      frontmatter-fence matches from body matches, can hand back raw frontmatter text, and
+      `tree_find`/`tree_grep` are retired.
 
 ### 15. Raw-binary delivery in `file_read`
 Hand raw bytes to claude.ai/ChatGPT and let *them* parse PDFs/images — the server
 extracts nothing (§8.3). The model can't reach the local bytes; that's the one
 thing only the server can do.
-- [ ] `file_read`: for non-text/binary files, instead of refusing, return the raw
-      bytes as a base64 blob (or an MCP resource), with a detected MIME type:
+- [x] `file_read`: for non-text/binary files, instead of refusing, return the raw
+      bytes as a base64 blob, with a detected MIME type:
       `{ "path", "content", "encoding": "base64", "mimeType", "truncated" }`.
       Keep the text path (and `binary: true` flag) for callers that want refusal.
-- [ ] Enforce `read.maxBytes`, `os.Root`, and policy exactly as for text reads;
+- [x] Enforce `read.maxBytes`, `os.Root`, and policy exactly as for text reads;
       binary delivery never widens the sandbox or policy.
-- [ ] Add an arg to opt into binary (e.g. `allowBinary: true`) so existing text
+- [x] Add an arg to opt into binary (`allowBinary: true`) so existing text
       callers keep today's refuse-binary behavior by default.
-- [ ] Tests: a PDF/image returns base64 + mimeType under the byte cap; oversize →
-      `truncated`; policy/`os.Root` still gate the path; text reads unchanged.
+- [x] Tests: an image returns base64 + mimeType under the byte cap (extension type
+      + content-sniff fallback); oversize → `truncated`; policy/`os.Root` still gate
+      the path; default (no `allowBinary`) still flags without content.
 - **Done when:** `file_read` can deliver raw binary content for the platform to
       parse, under the same byte/policy/sandbox limits, without server-side extraction.
 
@@ -702,6 +756,15 @@ already exists (§10, §14); this is the *behavioral* eval the research prescrib
       (b) **orients first** (calls `workspace_list` / reads README before drilling
       in) rather than guessing paths. This is manual against a real connector;
       capture pass/fail + notes, not an automated harness.
+- [ ] **Track calls-to-first-read** — the number of tool calls the model makes
+      before it reads the right file(s) — as a secondary metric. It is *not* as
+      critical as correctness (a slow-but-right session still passes), but a lower
+      count directly cuts latency and token cost, so the wording/steering should be
+      tuned to minimize it (e.g. one metadata-enriched `tree_search` instead of a
+      list pass then a re-list). Note the confound: early testing shows a ~100%
+      "hit-rate" precisely when the model *doesn't* use the workspace at all and
+      answers from its own knowledge — so calls-to-first-read must be read
+      alongside "did it actually consult the tree", not in isolation.
 - [ ] **Instructions probe:** put a distinctive, falsifiable directive in the
       `instructions` string (e.g. a specific first-call convention) and check
       whether behavior reflects it — the only practical way to tell if claude.ai
@@ -711,9 +774,10 @@ already exists (§10, §14); this is the *behavioral* eval the research prescrib
       re-run; iterate until the hit-rate is acceptable. Treat the prose as prompts
       under test, per the writing-tools-for-agents guidance.
 - **Done when:** the prompt set runs against a live claude.ai connector with a
-      recorded hit-rate, the instructions-honored question is answered, and any
-      wording fixes from the first pass have landed. Pairs with the §10 / §14 live
-      checks (folds into §12.10's verification rather than duplicating it).
+      recorded hit-rate *and* a recorded calls-to-first-read, the
+      instructions-honored question is answered, and any wording fixes from the
+      first pass have landed. Pairs with the §10 / §14 live checks (folds into
+      §12.10's verification rather than duplicating it).
 
 ### 17. Auto-detect orientation files by convention (no config)
 Task §12.12 detects a **fixed three** — `README.md`, `AGENTS.md`, `CLAUDE.md`.
@@ -723,27 +787,27 @@ contents, or `ABOUT`/`OVERVIEW`, and AGENTS/CLAUDE are usually absent. The fix i
 **not** a config knob (every user would hand-maintain a list that rots on rename);
 it's a broader **server-maintained recognizer** so a freshly-pointed workspace
 just works. Depends on §12.12 landing first.
-- [ ] Registry (`workspace/`): replace the hardcoded three with a built-in,
+- [x] Registry (`workspace/`): replace the hardcoded three with a built-in,
       curated stem set recognized **case-insensitively and extension-agnostically**
-      at the tree root only — e.g. `readme`, `index`, `_index`, `contents`, `toc`,
-      `overview`, `about`, `agents`, `claude`. Probe via `Root.Stat`/a single root
-      `ReadDir`, presence only (metadata, not content), each candidate gated by the
-      workspace's policy/`os.Root` exactly as in §12.12.
-- [ ] Return the actual filenames found (so `README.rst` or `index.md` surface as
-      themselves), newest-convention-first by a fixed priority order; cap the list
-      (e.g. ≤ 5) so a noisy root can't flood `workspace_list`.
-- [ ] Description fallback (§12.12) follows the same priority: derive the
+      at the tree root only — `readme`, `index`, `_index`, `contents`, `toc`,
+      `overview`, `about`, `agents`, `claude`. Single root `ReadDir`, presence only
+      (metadata, not content), regular files only (symlinks/dirs skipped), each
+      candidate gated by the workspace's policy/`os.Root` exactly as in §12.12.
+- [x] Return the actual filenames found (so `README.rst` or `index.md` surface as
+      themselves), in a fixed priority order (then alphabetical); cap the list
+      (≤ 5, `maxWellKnownFiles`) so a noisy root can't flood `workspace_list`.
+- [x] Description fallback (§12.12) follows the same priority: derive the
       `description` from the highest-priority detected orientation file's first
-      section, not `README.md` specifically.
-- [ ] `mcp/`: no schema change — `workspace_list`'s `wellKnownFiles` already
+      section (skipping binary candidates), not `README.md` specifically.
+- [x] `mcp/`: no schema change — `workspace_list`'s `wellKnownFiles` already
       carries whatever subset is present (§12.12).
-- [ ] Keep the recognizer a **closed, server-owned list** — deliberately not
+- [x] Keep the recognizer a **closed, server-owned list** — deliberately not
       user-extensible. If a real corpus needs a name we don't recognize, add it to
       the built-in set (a one-line code change with a test), don't add a config
       surface. Revisit only if that proves insufficient in practice.
-- [ ] Docs: note in [docs/design.md §5.5] that orientation files are auto-detected
+- [x] Docs: note in [docs/design.md §5.5] that orientation files are auto-detected
       by convention (and *why* it's convention-over-config).
-- [ ] Tests: each recognized stem/extension detected; case-insensitivity; non-root
+- [x] Tests: each recognized stem/extension detected; case-insensitivity; non-root
       matches ignored; policy-blocked names omitted; the cap holds; priority order
       drives both the list and the description fallback.
 - **Done when:** a workspace points the model at its real orientation file(s)
@@ -787,8 +851,8 @@ just works. Depends on §12.12 landing first.
 ## 15. Done definition (MVP = task 10 complete)
 
 1. claude.ai connects to the server as a remote MCP server over HTTPS.
-2. It can discover workspaces and list / read / fuzzy-find / grep allowed files in
-   each, plus git status on git-repo workspaces.
+2. It can discover workspaces and list / read / search (by path glob and body
+   content) allowed files in each, plus git status on git-repo workspaces.
 3. No write/edit/create/delete/shell/Git-mutation path exists (pre-patch task).
 4. Containment is enforced by a per-workspace `os.Root`; policy refuses sensitive
    in-tree paths; cross-workspace access is impossible.
@@ -838,23 +902,22 @@ just works. Depends on §12.12 landing first.
   notifications) so a stdio server can call it directly with no `net/http` /
   `httptest` involvement. Then rewrite `serveStdio` against that API and drop the
   in-process HTTP round-trip. (Not started — deliberate; do after MVP.)
-- **Discovery in a large repo.** `tree_grep`/`tree_find` are lexical; in a big
-  tree the model can't easily find the *right* file without already knowing a
-  term. Add a higher-level discovery aid. Two candidate approaches (pick one, or
-  offer both):
+- **Discovery in a large repo.** `tree_search` (§8.4) is lexical; in a big tree the
+  model can't easily find the *right* file without already knowing a term. Add a
+  higher-level discovery aid. Two candidate approaches (pick one, or offer both):
   - **Repo manifest.** Honor a checked-in manifest (e.g. `.workspace-mcp.yaml` or
     a `MANIFEST.md`) that maps paths/areas to human descriptions; expose it via a
     `workspace_overview` (or `tree_manifest`) tool so the model gets an annotated
     map before drilling in. Cheap, deterministic, author-controlled, no index to
     maintain — but only as good/fresh as the hand-written doc.
-  - **Semantic search.** Build/maintain an embedding index over allowed files and
-    add a `tree_search` tool that ranks by meaning, not substring. Far better
-    recall on "where is X handled?" queries — but needs an embedding model
-    (local or API), an index to build/refresh/invalidate (mind the os.Root +
-    policy + ignore filters so nothing blocked is ever indexed), and storage.
-    Heavier; keep it optional and per-workspace.
+  - **Semantic ranking.** Build/maintain an embedding index over allowed files and
+    add a meaning-ranked mode to `tree_search` (a `semantic`/`rank` option, not a new
+    tool — the collapsed surface stays one search tool). Far better recall on "where is
+    X handled?" queries — but needs an embedding model (local or API), an index to
+    build/refresh/invalidate (mind the os.Root + policy + ignore filters so nothing
+    blocked is ever indexed), and storage. Heavier; keep it optional and per-workspace.
   Likely start with the manifest (low cost, immediate UX win) and treat semantic
-  search as a later, opt-in upgrade. (Not started.)
+  ranking as a later, opt-in upgrade. (Not started.)
 - **Enrich workspace descriptions.** *Promoted to task §12.12* (config/README-derived
   `description` + `wellKnownFiles` on `workspace_list`). What remains here as future
   work: the in-tree **repo manifest** half (the `tree_manifest`/`workspace_overview`

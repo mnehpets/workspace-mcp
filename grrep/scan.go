@@ -78,6 +78,15 @@ func ScanFile(displayPath string, f io.ReadSeeker, m *Matcher) []Match {
 	}
 }
 
+// ScanBytes returns the lines in data matched by m, labelled with displayPath.
+// It is the in-memory counterpart to ScanFile: a caller that has already read
+// (and size-bounded) a file can feed the same buffer to several matchers and do
+// its own frontmatter-fence detection without re-reading. Binary data (a NUL in
+// the head) yields nil, exactly as ScanFile does.
+func ScanBytes(displayPath string, data []byte, m *Matcher) []Match {
+	return scanWholeBody(displayPath, data, m)
+}
+
 // scanWholeBody finds matches by sliding bytes.Index over data. Cheap when a
 // file has no matches at all — one bytes.Index call returns -1 and we're done.
 func scanWholeBody(path string, data []byte, m *Matcher) []Match {

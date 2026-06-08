@@ -73,8 +73,8 @@ const serverInstructions = `This server is a read-only window into one or more l
 
 How to use it:
 1. Call workspace_list first to discover the available workspaces (the "workspace" argument on every other tool defaults to "default").
-2. Orient before diving: list a workspace's root with tree_list and read its README.md (and AGENTS.md/CLAUDE.md if present) with file_read to learn what it contains.
-3. Locate: tree_find for files whose name you can guess; tree_grep to find where a term appears when you don't know the file. Narrow tree_grep with "path" to avoid truncation.
+2. Orient before diving: read a workspace's README.md (and AGENTS.md/CLAUDE.md if present) with file_read to learn what it contains, and use tree_search to see what files exist.
+3. Locate and browse: tree_search finds files by path and/or content. Omit "path" (or pass "**/*") to see the ENTIRE tree at once; use a glob like "docs/**/*.md" to narrow by name/location ("**" crosses directories, a single "*" does not — "*" is root-level only). Add "where" (content predicates) to find where a term appears. Omit "where" to just list matching files with their sizes (this is also how you explore directory structure) — and pass "includeMetadata": true on that listing to get each file's frontmatter (title/tags/summary) so you can pick the right files in one pass instead of guessing from filenames. Narrow "path" to avoid truncation.
 4. Read: file_read returns a file's contents; large files truncate at a byte cap (raise "maxBytes" up to the workspace limit).
 5. git_status gives branch + per-file change codes on git-repo workspaces.
 
@@ -198,10 +198,8 @@ func (s *Server) ToolsCall(_ context.Context, p ToolsCallParams) (ToolResult, er
 // toolHandlers maps tool name to handler (method expressions).
 var toolHandlers = map[string]toolFunc{
 	"workspace_list": (*Server).workspaceList,
-	"tree_list":      (*Server).treeList,
 	"file_read":      (*Server).fileRead,
-	"tree_find":      (*Server).treeFind,
-	"tree_grep":      (*Server).treeGrep,
+	"tree_search":    (*Server).treeSearch,
 	"git_status":     (*Server).gitStatus,
 }
 
@@ -273,11 +271,13 @@ func errorResult(te *toolError) ToolResult {
 	return ToolResult{Content: []TextContent{{Type: "text", Text: string(b)}}, IsError: true}
 }
 
-// invalidPattern wraps a search.InvalidPatternError.
-func invalidPattern(err error) *toolError {
+// mapSearchError maps a tree_search failure: an uncompilable regex predicate to
+// INVALID_PATTERN, anything else (e.g. an absolute/traversing path glob) through
+// the shared path-error mapping.
+func mapSearchError(err error) *toolError {
 	var ip *search.InvalidPatternError
 	if errors.As(err, &ip) {
 		return &toolError{Code: "INVALID_PATTERN", Message: ip.Err.Error()}
 	}
-	return asToolError(err)
+	return mapPathError(err)
 }

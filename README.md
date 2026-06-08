@@ -174,10 +174,8 @@ Then start a chat and ask Claude to use the connector, e.g.:
 | Tool             | What it does                                                        |
 | ---------------- | ------------------------------------------------------------------- |
 | `workspace_list` | List configured workspaces (`{name, isGitRepo}`). No params.        |
-| `tree_list`      | List directory entries (`path`, optional `recursive`).             |
 | `file_read`      | Read one allowed file (`path`, optional `maxBytes`).               |
-| `tree_find`      | Fuzzy filename search (`query`, optional `limit`).                 |
-| `tree_grep`      | Content search (`pattern`; `fixedString` default true, else regex). |
+| `tree_search`    | Find/browse files by `path` glob and/or `where` content predicates (frontmatter-aware); each result carries its `size`. |
 | `git_status`     | Branch + per-file status — git-repo workspaces only.              |
 
 Every tool except `workspace_list` takes a `workspace` string (defaults to

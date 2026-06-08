@@ -4,9 +4,8 @@ This document records the *design decisions* and the reasoning behind them, the
 division of functionality across packages, the configuration file, and — most
 importantly — the **MCP schema** (the wire surface seen by claude.ai / ChatGPT).
 
-`PLAN.md` is a scratch planning doc and will be deleted; this is the durable
-reference. Where this doc and the code disagree, the code wins — file/line
-references are given so claims stay checkable.
+This is the durable reference. Where this doc and the code disagree, the code
+wins — file/line references are given so claims stay checkable.
 
 ---
 
@@ -40,7 +39,7 @@ absent):
   "what changed". Replicating them buys nothing.
 - **Hand over raw bytes, don't transform them.** For non-text research artifacts
   (PDF, images) the right move is to deliver the raw bytes and let the platform
-  parse them (planned — `file_read` binary delivery), not to build extractors.
+  parse them (`file_read` `allowBinary` → base64 + `mimeType`), not to build extractors.
 - **Orientation is the one exception, and only when it's aggregation the model
   can't cheaply do** — e.g. a corpus-wide tag/frontmatter rollup, or per-workspace
   descriptions. A table of contents, not an analysis engine.
@@ -154,9 +153,10 @@ grrep/               Vendored from bep/grrep (Apache-2.0, SPDX retained, see
                      scan.go adapted to emit structured {path,line,text} instead of
                      CLI stdout; ignore.go = IgnoreSet (nested .gitignore/.ignore).
 
-search/              Drives grrep over a workspace. grep.go: fastwalk + per-leaf
-                     os.Root open + policy/ignore filter + worker pool + match cap.
-                     find.go: fuzzy filename search over the filtered tree.
+search/              Drives grrep over a workspace. search.go: the tree_search
+                     engine — path glob + AND-combined where predicates, fastwalk
+                     + per-leaf os.Root open + policy/ignore filter + worker pool
+                     + match cap, with frontmatter-fence splitting.
 
 gitaware/            go-git (pure Go) git-awareness, metadata only. detect.go
                      (is it a repo?), status.go (Worktree().Status() + branch),
@@ -298,43 +298,90 @@ Every tool also carries read-only MCP **annotations** (§5.5).
 
 #### `workspace_list`
 Discover the configured trees. No params.
-- **out** `{ "workspaces": [ { "name": string, "isGitRepo": bool } ] }`. Never
-  exposes roots. *(Planned: `description` + `wellKnownFiles` — PLAN §12.12.)*
-
-#### `tree_list`
-List directory entries.
-- **in** `workspace`, `path` (dir, default root), `recursive` (bool)
-- **out** `{ "entries": [ { "path": string, "type": "file"|"dir", "size": int } ] }`
-- Backed by `os.Root` `ReadDir`/`WalkDir`, filtered by the workspace's `IgnoreSet`
-  (when `respectGitignore`) and its policy globs. ([mcp/tools.go:171])
+- **out** `{ "workspaces": [ { "name": string, "isGitRepo": bool, "description"?:
+  string, "wellKnownFiles"?: [ string, … ] } ] }`. Never exposes roots.
+- `wellKnownFiles` lists the orientation files present at the root, auto-detected
+  by a closed convention recognizer (§5.5) — a curated stem set (`readme`, `index`,
+  `_index`, `contents`, `toc`, `overview`, `about`, `agents`, `claude`) matched
+  case-insensitively and extension-agnostically, presence-only, policy-gated,
+  priority-ordered and capped at 5. `description` is the config `description` if
+  set, else the first section of the highest-priority detected file (heading prose,
+  whitespace-collapsed, capped). Both computed once at startup
+  ([workspace/registry.go]).
 
 #### `file_read`
-Read one allowed file.
-- **in** `path` ★, `workspace`, `maxBytes` (capped by `read.maxBytes`)
-- **out** `{ "path": string, "content": string, "truncated": bool, "binary": bool, "notice"?: string }`
-- Opens via `os.Root`; binary detected by a NUL probe over the first 8 KB — when
-  binary, `content` is omitted and `binary: true`. Oversize → `truncated: true`
-  plus a steering `notice` (§5.5). ([mcp/tools.go:284]) *(Planned: `startLine`/`endLine` ranges — PLAN §12.13; raw
-  base64 binary delivery — PLAN §12.15.)*
+Read one allowed file, optionally a line span.
+- **in** `path` ★, `workspace`, `maxBytes` (capped by `read.maxBytes`),
+  `startLine`/`endLine` (1-based inclusive, either omittable → open-ended),
+  `allowBinary` (bool)
+- **out** `{ "path": string, "content": string, "truncated": bool, "binary": bool,
+  "encoding"?: "base64", "mimeType"?: string, "startLine"?: int, "endLine"?: int,
+  "totalLines"?: int, "notice"?: string }`
+- Opens via `os.Root`; binary detected by a NUL probe over the first 8 KB. By
+  default a binary file is flagged (`binary: true`, no `content`, regardless of any
+  range); with `allowBinary` its raw bytes are returned base64-encoded
+  (`encoding: "base64"` + a detected `mimeType` — extension type, else content
+  sniff) for the platform to parse, the server extracting nothing. Same
+  `os.Root`/policy/byte-cap limits as a text read. Oversize → `truncated: true`
+  plus a steering `notice` (§5.5). With a range, the scan is bounded by
+  `read.maxBytes`, the returned span is then capped by the arg `maxBytes`, and the
+  line fields echo the resolved span + `totalLines` so the model can page;
+  out-of-bounds ranges clamp, bad bounds → `INVALID_RANGE`. ([mcp/tools.go])
 
-#### `tree_find`
-Fuzzy filename search.
-- **in** `query` ★, `workspace`, `limit` (default 100)
-- **out** `{ "files": [ string, … ], "truncated"?: bool, "notice"?: string }`
-  (workspace-relative paths; capped at `limit` → `truncated` + steering `notice`,
-  §5.5). ([mcp/tools.go:362])
-
-#### `tree_grep`
-Concurrent content search (vendored grrep core). Requires `grep.enabled`.
-- **in** `pattern` ★, `workspace`, `path` (subtree, default root),
-  `fixedString` (default **true** = literal substring; false = Go regexp with a
-  literal pre-filter), `caseInsensitive`, `wordBoundary`
-- **out** `{ "matches": [ { "path": string, "line": int, "text": string } ],
-  "truncated": bool, "notice"?: string }`
-- `fastwalk` traversal, policy + `IgnoreSet` + `.git`/dotfile skip, NUL-byte binary
-  skip, each leaf opened via `os.Root`, worker pool sized by `grep.workers`, capped
-  at `grep.maxMatches` (`truncated` + steering `notice` when hit, §5.5). Disabled →
-  `GREP_DISABLED`; bad regex → `INVALID_PATTERN` (no walk). ([mcp/tools.go:392])
+#### `tree_search`
+One tool to locate *and browse* files — by path, by content, or both — replacing
+the former `tree_find`/`tree_grep` split (the boundary encoded two match
+*vocabularies*, glob/name vs literal-or-regex content, not two tools) and also
+the former `tree_list`: a where-less path-glob query enumerates files with their
+sizes, which is all a directory listing offered (a separate listing tool was
+redundant once any subtree could be enumerated by glob, and directory entries
+themselves carried no information the file paths don't). Concurrent content
+search over the vendored grrep core.
+- **in** `workspace`, `path` (a doublestar **glob**, both the search boundary and
+  a name filter, e.g. `docs/**/*.{md,txt}`; **omit (or `**/*`) for the whole tree**
+  — `**` crosses directories, a single `*` does not, so `*` is root-level only),
+  `where` (a list of body predicates, **AND-combined** — a file must
+  satisfy every one; each `{ text ★, fixedString` (default **true** = literal
+  substring; false = Go regexp with a literal pre-filter)`, caseInsensitive,
+  wordBoundary }`), `includeMatches` (default **true**), `includeMetadata`
+  (default **false**)
+- **out** `{ "files": [ { "path": string, "size": int, "matches"?: [ { "line":
+  int, "text": string } ], "metadataMatches"?: [ … ], "metadata"?: string } ],
+  "truncated": bool, "notice"?: string }`. `size` (byte size, from the walk's dir
+  entry) is always present.
+- A **pure path-glob query (no `where`)** enumerates matching files with their
+  sizes — it only walks, does **not** open files, and does **not** require
+  `grep.enabled`. This is how a client answers "what files exist?" / browses
+  structure — omit `path` (or `**/*`) for the whole tree, `docs/**` for a subtree,
+  `*` for just the root level; there is no separate directory-listing tool.
+  Content predicates additionally need `grep.enabled`.
+- **Frontmatter-aware, parser-free.** A leading `---`…`---` fence is located
+  *textually* (never a YAML parse): matches inside it are split into
+  `metadataMatches` (vs body `matches`), so a *declared* topic
+  (`tags: [california]`) is distinguishable from an incidental body mention, and
+  `includeMetadata` returns the raw, unparsed fence body as `metadata`. Combined
+  with a where-less enumeration it turns a plain listing into a triage pass — the
+  model reads each file's own title/tags/summary and picks the right targets in
+  one call instead of inferring from filenames. (This is the built-in "cheap
+  orientation" stance of §1 — author-declared signal handed over raw, no
+  server-side ranking.) This path stays cheap: it needs no `grep.enabled`, and it
+  reads only the leading fence region per file (streamed, stopping at the closing
+  `---`, bounded by a 64 KiB probe — capped further by `read.maxBytes`), never the
+  body; a fence that does not close within the probe yields no metadata, the file
+  still listed. Field-scoped predicates (matching *within* a named field) stay out
+  of scope —
+  a structured-metadata query is a non-goal (§1): the server finds the fence,
+  never queries inside it.
+- `fastwalk` traversal narrowed to the glob's literal prefix, policy + `IgnoreSet`
+  + `.git`/dotfile skip, NUL-byte binary skip, each leaf opened via `os.Root`,
+  worker pool sized by `grep.workers`, capped at `grep.maxMatches` (`truncated` +
+  steering `notice` when hit, §5.5). Content read is bounded by `read.maxBytes`.
+  `where` with grep disabled → `GREP_DISABLED`; bad regex → `INVALID_PATTERN` (no
+  walk). `fastwalk` runs its callback **concurrently**, so the walk serializes its
+  shared state — the results slice and the (non-thread-safe) gogitignore tree's
+  `Match`/`EnsureNode` — under a mutex; the candidate scan then runs through its
+  own worker pool writing to per-index slots (deterministic, path-sorted before
+  the cap). ([search/walk.go], [mcp/tools.go])
 
 #### `git_status`
 Read-only status, git-repo workspaces only.
@@ -356,7 +403,7 @@ Domain failures return `isError: true` with `{ code, message, reason? }`
 |---|---|---|
 | `UNKNOWN_WORKSPACE` | named workspace not configured | — |
 | `NOT_A_GIT_REPO` | git tool on a non-git workspace | — |
-| `GREP_DISABLED` | `tree_grep` where `grep.enabled` is false | — |
+| `GREP_DISABLED` | `tree_search` with `where` predicates where `grep.enabled` is false | — |
 | `POLICY_DENIED` | path blocked or outside the sandbox | `absolute_path`, `traversal`, `outside_root`, `blocked_glob`, dotfile reason |
 | `NOT_FOUND` | missing path / path is a directory (file_read) | — |
 | `INVALID_PATTERN` | bad regex (`fixedString:false`); no walk performed | — |
@@ -382,11 +429,11 @@ general-purpose hosts may ignore any one of them.
   read), and the hard constraints (read-only; default-deny, so `NOT_FOUND` /
   `POLICY_DENIED` are *expected answers*, not transient errors to retry).
   **Best-effort:** the MCP spec lets servers send it, but some hosts ignore it
-  (claude.ai's handling is unverified — see PLAN §12.16). So it is never
+  (claude.ai's handling is unverified — a behavioral eval is still pending). So it is never
   load-bearing; the two layers below stand alone.
 - **Tool descriptions** ([mcp/tools.go]) — each says *what* it does, *when* to
-  reach for it, and its *boundary vs siblings* (e.g. `tree_find` = locate by name,
-  `tree_grep` = locate by content; `file_read` follows the locators).
+  reach for it, and its *boundary vs siblings* (e.g. `tree_search` = locate by
+  path glob and/or content; `file_read` follows the locator).
   `workspace_list` is worded as the **"start here"** entry point — the natural
   first call that survives a host dropping `instructions`.
 - **Tool annotations** ([mcp/tools.go]) — every tool carries MCP
@@ -394,11 +441,24 @@ general-purpose hosts may ignore any one of them.
   machine-readable restatement of "this only reads, and only from the local
   sandbox," which clients can surface in UI and trust decisions.
 
+**Orientation files are auto-detected by convention, not configured.** A fourth,
+quieter layer: `workspace_list` surfaces each tree's orientation files
+(`wellKnownFiles`) and a `description`. These are found by a **closed,
+server-owned recognizer** — a curated set of root-file stems (`readme`, `index`,
+`_index`, `contents`, `toc`, `overview`, `about`, `agents`, `claude`) matched
+case-insensitively and extension-agnostically, presence-only and policy-gated,
+priority-ordered and capped. The choice is deliberately convention-over-config: a
+per-workspace list would be a usability tax that rots on every rename, whereas a
+freshly-pointed workspace "just works" if it follows any common doc/notes
+convention. To teach the server a new name, add a stem in code (with a test) — not
+a config knob ([workspace/registry.go]). The same priority order
+picks which file the `description` falls back to.
+
 **Truncation steers, it doesn't just flag.** When a result is capped
-(`file_read` by bytes, `tree_grep`/`tree_find` by their caps) the response adds a
-`notice` string telling the model how to get the rest — narrow the `path`, tighten
-the `pattern`, raise `maxBytes`/`limit` — instead of letting it treat a partial
-result as complete.
+(`file_read` by bytes, `tree_search` by its match cap) the response adds a
+`notice` string telling the model how to get the rest — narrow the `path` glob,
+add a more specific `where` predicate, raise `maxBytes` — instead of letting it
+treat a partial result as complete.
 
 ---
 
@@ -432,9 +492,12 @@ commit/push. The research-workflow cousin is "capture results back" (append a
 finding to an inbox note) — also a write, same umbrella.
 
 Other candidates, each measured against the §1 thin-pipe rule: read-only `git_log`
-(whole-workspace + per-file), `git_blame`, `git_show`, `git_diff`; richer
-`workspace_list` (config/README-derived `description` + `wellKnownFiles`); a
-`tree_metadata` tag/frontmatter rollup (the one orientation-aggregation exception);
-ranged + raw-binary `file_read`; an author-controlled repo manifest. Anything that
-would have the server rank by meaning, build graphs, or summarize is **out** — that
-is the model's job.
+(whole-workspace + per-file), `git_blame`, `git_show`, `git_diff`; an
+author-controlled repo manifest; a meaning-ranked mode on `tree_search` (an opt-in
+semantic upgrade, not a new tool). A corpus-wide `tree_metadata` tag/frontmatter
+rollup was considered and **rejected** — it serves database-like querying of a
+*known* schema, contradicting the orient-an-*unfamiliar*-tree premise; content
+search already finds metadata values as plain text. (Richer `workspace_list` with
+`description`/`wellKnownFiles`, ranged `file_read`, raw-binary `file_read`, and the
+consolidated `tree_search` have since landed.) Anything that would have the server
+rank by meaning, build graphs, or summarize is **out** — that is the model's job.

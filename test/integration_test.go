@@ -145,26 +145,32 @@ func TestIntegrationReadFlow(t *testing.T) {
 		t.Error("default should be a git repo")
 	}
 
-	// tree_list root: README.md visible; .env and .git hidden.
-	var tl struct {
-		Entries []struct {
+	// tree_search enumeration (no `where`): README.md visible with a size;
+	// .env (blocked) and .git contents hidden.
+	var enRoot struct {
+		Files []struct {
 			Path string `json:"path"`
-			Type string `json:"type"`
-		} `json:"entries"`
+			Size int64  `json:"size"`
+		} `json:"files"`
 	}
-	f.callTool(t, "tree_list", map[string]any{"workspace": "default"}, &tl)
-	names := map[string]string{}
-	for _, e := range tl.Entries {
-		names[e.Path] = e.Type
+	f.callTool(t, "tree_search", map[string]any{"workspace": "default"}, &enRoot)
+	sizes := map[string]int64{}
+	for _, e := range enRoot.Files {
+		sizes[e.Path] = e.Size
 	}
-	if names["README.md"] != "file" {
-		t.Errorf("README.md should be listed as file, entries=%+v", tl.Entries)
+	if _, ok := sizes["README.md"]; !ok {
+		t.Errorf("README.md should be enumerated, files=%+v", enRoot.Files)
 	}
-	if _, ok := names[".env"]; ok {
-		t.Error(".env must not be listed")
+	if sizes["README.md"] <= 0 {
+		t.Errorf("README.md should report a positive size, got %d", sizes["README.md"])
 	}
-	if _, ok := names[".git"]; ok {
-		t.Error(".git must not be listed")
+	if _, ok := sizes[".env"]; ok {
+		t.Error(".env must not be enumerated")
+	}
+	for p := range sizes {
+		if strings.HasPrefix(p, ".git/") {
+			t.Errorf(".git contents must not be enumerated: %q", p)
+		}
 	}
 
 	// file_read allowed.
@@ -201,30 +207,68 @@ func TestIntegrationReadFlow(t *testing.T) {
 	// file_read traversal -> POLICY_DENIED.
 	assertToolError(t, f.callTool(t, "file_read", map[string]any{"workspace": "default", "path": "../../etc/passwd"}, nil), "POLICY_DENIED")
 
-	// tree_grep.
-	var gr struct {
+	// tree_search by content (where predicate).
+	type searchFile struct {
+		Path    string `json:"path"`
 		Matches []struct {
-			Path string `json:"path"`
 			Line int    `json:"line"`
 			Text string `json:"text"`
 		} `json:"matches"`
-		Truncated bool `json:"truncated"`
 	}
-	f.callTool(t, "tree_grep", map[string]any{"workspace": "default", "pattern": "ASC workflow"}, &gr)
-	if len(gr.Matches) != 1 || gr.Matches[0].Path != "docs/guide.md" {
-		t.Errorf("grep result unexpected: %+v", gr.Matches)
+	var sr struct {
+		Files     []searchFile `json:"files"`
+		Truncated bool         `json:"truncated"`
+	}
+	f.callTool(t, "tree_search", map[string]any{
+		"workspace": "default",
+		"where":     []map[string]any{{"text": "ASC workflow"}},
+	}, &sr)
+	if len(sr.Files) != 1 || sr.Files[0].Path != "docs/guide.md" || len(sr.Files[0].Matches) != 1 {
+		t.Errorf("content search result unexpected: %+v", sr.Files)
 	}
 
-	// tree_grep disabled on notes -> GREP_DISABLED.
-	assertToolError(t, f.callTool(t, "tree_grep", map[string]any{"workspace": "notes", "pattern": "milk"}, nil), "GREP_DISABLED")
+	// tree_search with a where predicate, grep disabled on notes -> GREP_DISABLED.
+	assertToolError(t, f.callTool(t, "tree_search", map[string]any{
+		"workspace": "notes",
+		"where":     []map[string]any{{"text": "milk"}},
+	}, nil), "GREP_DISABLED")
 
-	// tree_find.
-	var fd struct {
-		Files []string `json:"files"`
+	// tree_search enumeration with includeMetadata (no `where`) does NOT require
+	// grep — the triage-while-browsing path must work on a grep-disabled tree.
+	var enMeta struct {
+		Files []searchFile `json:"files"`
 	}
-	f.callTool(t, "tree_find", map[string]any{"workspace": "default", "query": "guide"}, &fd)
-	if len(fd.Files) == 0 || fd.Files[0] != "docs/guide.md" {
-		t.Errorf("find unexpected: %+v", fd.Files)
+	f.callTool(t, "tree_search", map[string]any{
+		"workspace":       "notes",
+		"includeMetadata": true,
+	}, &enMeta)
+	var sawTodo bool
+	for _, fle := range enMeta.Files {
+		if fle.Path == "todo.md" {
+			sawTodo = true
+		}
+	}
+	if !sawTodo {
+		t.Errorf("metadata enumeration on grep-disabled notes should list todo.md: %+v", enMeta.Files)
+	}
+
+	// tree_search by path glob only (enumeration) — no `where`, so it does not
+	// need grep and works on the notes workspace too.
+	var en struct {
+		Files []searchFile `json:"files"`
+	}
+	f.callTool(t, "tree_search", map[string]any{"workspace": "default", "path": "docs/**/*.md"}, &en)
+	var found bool
+	for _, fle := range en.Files {
+		if fle.Path == "docs/guide.md" {
+			found = true
+		}
+		if len(fle.Matches) != 0 {
+			t.Errorf("enumeration should carry no matches: %+v", fle)
+		}
+	}
+	if !found {
+		t.Errorf("enumeration did not list docs/guide.md: %+v", en.Files)
 	}
 
 	// git_status on git workspace.

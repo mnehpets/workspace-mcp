@@ -45,6 +45,7 @@ type WorkspaceConfig struct {
 	Name             string       `yaml:"name"`
 	Root             string       `yaml:"root"`
 	RespectGitignore bool         `yaml:"respectGitignore"`
+	Description      string       `yaml:"description"` // optional; what the tree is for. Falls back to the README's first section.
 	Policy           PolicyConfig `yaml:"policy"`
 	Read             ReadConfig   `yaml:"read"`
 	Grep             GrepConfig   `yaml:"grep"`

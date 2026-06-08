@@ -22,6 +22,9 @@ auth:
 workspaces:
   - name: default
     root: /absolute/path/to/a/tree     # this workspace's os.Root sandbox
+    # description: "What this tree is for."  # optional; shown in workspace_list so
+                                             # the model picks by intent. Omit to fall
+                                             # back to the README's first section.
     respectGitignore: true             # via grrep IgnoreSet (works on any tree)
     policy:                            # allow/deny on top of os.Root (BLOCKED wins)
       allowGlobs:
