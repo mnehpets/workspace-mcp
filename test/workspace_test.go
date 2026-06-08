@@ -6,11 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/mnehpets/workspace-mcp/config"
-	"github.com/mnehpets/workspace-mcp/workspace"
+	"github.com/mnehpets/workspace-mcp/mcp"
 )
 
-func twoWorkspaceRegistry(t *testing.T) (*workspace.Registry, string, string) {
+func twoWorkspaceRegistry(t *testing.T) (*mcp.Registry, string, string) {
 	t.Helper()
 	d1 := t.TempDir()
 	d2 := t.TempDir()
@@ -20,13 +19,13 @@ func twoWorkspaceRegistry(t *testing.T) (*workspace.Registry, string, string) {
 	if err := os.WriteFile(filepath.Join(d2, "in2.md"), []byte("two"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{
-		Workspaces: []config.WorkspaceConfig{
-			{Name: "default", Root: d1, Policy: config.PolicyConfig{AllowGlobs: []string{"**/*.md"}}, Read: config.ReadConfig{MaxBytes: 1000}},
-			{Name: "notes", Root: d2, Policy: config.PolicyConfig{AllowGlobs: []string{"**/*.md"}}, Read: config.ReadConfig{MaxBytes: 1000}},
+	cfg := &mcp.Config{
+		Workspaces: []mcp.WorkspaceConfig{
+			{Name: "default", Root: d1, Policy: mcp.PolicyConfig{AllowGlobs: []string{"**/*.md"}}, Read: mcp.ReadConfig{MaxBytes: 1000}},
+			{Name: "notes", Root: d2, Policy: mcp.PolicyConfig{AllowGlobs: []string{"**/*.md"}}, Read: mcp.ReadConfig{MaxBytes: 1000}},
 		},
 	}
-	reg, err := workspace.Build(cfg)
+	reg, err := mcp.Build(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +46,7 @@ func TestRegistryDefault(t *testing.T) {
 
 func TestRegistryUnknown(t *testing.T) {
 	reg, _, _ := twoWorkspaceRegistry(t)
-	if _, err := reg.Get("nope"); err != workspace.ErrUnknownWorkspace {
+	if _, err := reg.Get("nope"); err != mcp.ErrUnknownWorkspace {
 		t.Fatalf("expected ErrUnknownWorkspace, got %v", err)
 	}
 }

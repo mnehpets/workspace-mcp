@@ -8,8 +8,7 @@ import (
 	"testing"
 
 	"github.com/mnehpets/http/endpoint"
-	"github.com/mnehpets/workspace-mcp/audit"
-	"github.com/mnehpets/workspace-mcp/auth"
+	"github.com/mnehpets/workspace-mcp/mcp"
 )
 
 const testToken = "0123456789abcdef0123456789abcdef" // 32 bytes
@@ -23,8 +22,8 @@ func okEndpoint(w http.ResponseWriter, r *http.Request, _ struct{}) (endpoint.Re
 	}), nil
 }
 
-func protectedHandler(log *audit.Logger) http.Handler {
-	return endpoint.Handler(okEndpoint, auth.NewBearer([]string{testToken}, log))
+func protectedHandler(log *mcp.Logger) http.Handler {
+	return endpoint.Handler(okEndpoint, mcp.NewBearer([]string{testToken}, log))
 }
 
 func TestBearerMissingToken(t *testing.T) {
@@ -64,7 +63,7 @@ func TestBearerValidToken(t *testing.T) {
 func TestBearerMultipleTokensRotation(t *testing.T) {
 	const oldToken = "0000000000000000oldoldoldoldoldo" // 32 bytes
 	const newToken = "1111111111111111newnewnewnewnewn" // 32 bytes
-	h := endpoint.Handler(okEndpoint, auth.NewBearer([]string{oldToken, newToken}, nil))
+	h := endpoint.Handler(okEndpoint, mcp.NewBearer([]string{oldToken, newToken}, nil))
 
 	cases := []struct {
 		name  string
@@ -90,7 +89,7 @@ func TestBearerMultipleTokensRotation(t *testing.T) {
 
 // An empty token set rejects everything (no token can match).
 func TestBearerNoTokensRejectsAll(t *testing.T) {
-	h := endpoint.Handler(okEndpoint, auth.NewBearer(nil, nil))
+	h := endpoint.Handler(okEndpoint, mcp.NewBearer(nil, nil))
 	req := httptest.NewRequest("POST", "/mcp", nil)
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	rec := httptest.NewRecorder()
@@ -103,7 +102,7 @@ func TestBearerNoTokensRejectsAll(t *testing.T) {
 // The token must never appear in the audit log, on success or failure.
 func TestBearerTokenNeverLogged(t *testing.T) {
 	var buf bytes.Buffer
-	log := audit.New("info", &buf)
+	log := mcp.NewLogger("info", &buf)
 	h := protectedHandler(log)
 
 	for _, tok := range []string{testToken, "wrong-but-secret-token-zzzzzzzzzz"} {

@@ -18,11 +18,8 @@ import (
 
 	"github.com/mnehpets/http/endpoint"
 	"github.com/mnehpets/http/jsonrpc"
-	"github.com/mnehpets/workspace-mcp/audit"
-	"github.com/mnehpets/workspace-mcp/auth"
-	"github.com/mnehpets/workspace-mcp/config"
+
 	"github.com/mnehpets/workspace-mcp/mcp"
-	"github.com/mnehpets/workspace-mcp/workspace"
 )
 
 func main() {
@@ -38,11 +35,11 @@ func run() error {
 	stdio := flag.Bool("stdio", false, "run as a local stdio MCP server (no HTTP, no bearer auth)")
 	flag.Parse()
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := mcp.LoadConfig(*configPath)
 	if err != nil {
 		return err
 	}
-	env, err := config.LoadEnv(*envPath)
+	env, err := mcp.LoadEnv(*envPath)
 	if err != nil {
 		return err
 	}
@@ -61,9 +58,9 @@ func run() error {
 	}
 
 	// All logging goes to stderr; in stdio mode stdout is reserved for the protocol.
-	log := audit.New(cfg.Log.Level, os.Stderr)
+	log := mcp.NewLogger(cfg.Log.Level, os.Stderr)
 
-	reg, err := workspace.Build(cfg)
+	reg, err := mcp.Build(cfg)
 	if err != nil {
 		return err
 	}
@@ -85,11 +82,11 @@ func run() error {
 
 // buildHandler wires the HTTP routes: an unauthenticated /healthz, plus
 // bearer-protected POST /mcp (JSON-RPC) and GET /mcp (SSE keepalive stream).
-func buildHandler(server *mcp.Server, log *audit.Logger, bearerTokens []string) http.Handler {
+func buildHandler(server *mcp.Server, log *mcp.Logger, bearerTokens []string) http.Handler {
 	rpc := jsonrpc.NewEndpoint()
 	server.Register(rpc)
 
-	bearer := auth.NewBearer(bearerTokens, log)
+	bearer := mcp.NewBearer(bearerTokens, log)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -106,7 +103,7 @@ func buildHandler(server *mcp.Server, log *audit.Logger, bearerTokens []string) 
 // and tool gating as the HTTP path by driving the in-process handler with a
 // synthetic request per message. There is no bearer auth: stdio is local and
 // trusted by construction.
-func serveStdio(server *mcp.Server, log *audit.Logger) error {
+func serveStdio(server *mcp.Server, log *mcp.Logger) error {
 	rpc := jsonrpc.NewEndpoint()
 	server.Register(rpc)
 	handler := endpoint.Handler(rpc.Endpoint)

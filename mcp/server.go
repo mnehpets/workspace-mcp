@@ -10,11 +10,7 @@ import (
 	"os"
 
 	"github.com/mnehpets/http/jsonrpc"
-	"github.com/mnehpets/workspace-mcp/audit"
-	"github.com/mnehpets/workspace-mcp/fsroot"
 	"github.com/mnehpets/workspace-mcp/gitaware"
-	"github.com/mnehpets/workspace-mcp/search"
-	"github.com/mnehpets/workspace-mcp/workspace"
 )
 
 const serverName = "workspace-mcp"
@@ -27,12 +23,12 @@ var supportedProtocols = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
 
 // Server holds shared state for the MCP handlers.
 type Server struct {
-	reg *workspace.Registry
-	log *audit.Logger
+	reg *Registry
+	log *Logger
 }
 
 // NewServer builds a Server.
-func NewServer(reg *workspace.Registry, log *audit.Logger) *Server {
+func NewServer(reg *Registry, log *Logger) *Server {
 	return &Server{reg: reg, log: log}
 }
 
@@ -165,7 +161,7 @@ type ToolResult struct {
 
 // toolFunc is a tool handler. It returns the result value, audit metadata, and
 // an error (a *toolError for in-band domain failures).
-type toolFunc func(s *Server, args json.RawMessage) (any, audit.ToolEvent, error)
+type toolFunc func(s *Server, args json.RawMessage) (any, ToolEvent, error)
 
 // ToolsCall dispatches to the named tool, enforcing the allowlist and mapping
 // domain errors to isError results while protocol errors stay JSON-RPC errors.
@@ -230,9 +226,9 @@ func asToolError(err error) *toolError {
 // tool error.
 func mapPathError(err error) *toolError {
 	switch {
-	case errors.Is(err, fsroot.ErrAbsolutePath):
+	case errors.Is(err, ErrAbsolutePath):
 		return &toolError{Code: "POLICY_DENIED", Message: "absolute path not allowed", Reason: "absolute_path"}
-	case errors.Is(err, fsroot.ErrTraversal):
+	case errors.Is(err, ErrTraversal):
 		return &toolError{Code: "POLICY_DENIED", Message: "path traversal not allowed", Reason: "traversal"}
 	case errors.Is(err, os.ErrNotExist):
 		return &toolError{Code: "NOT_FOUND", Message: "not found"}
@@ -247,7 +243,7 @@ func mapPathError(err error) *toolError {
 
 // mapWorkspaceError maps a registry lookup failure.
 func mapWorkspaceError(err error) *toolError {
-	if errors.Is(err, workspace.ErrUnknownWorkspace) {
+	if errors.Is(err, ErrUnknownWorkspace) {
 		return &toolError{Code: "UNKNOWN_WORKSPACE", Message: "unknown workspace"}
 	}
 	return asToolError(err)
@@ -275,7 +271,7 @@ func errorResult(te *toolError) ToolResult {
 // INVALID_PATTERN, anything else (e.g. an absolute/traversing path glob) through
 // the shared path-error mapping.
 func mapSearchError(err error) *toolError {
-	var ip *search.InvalidPatternError
+	var ip *InvalidPatternError
 	if errors.As(err, &ip) {
 		return &toolError{Code: "INVALID_PATTERN", Message: ip.Err.Error()}
 	}

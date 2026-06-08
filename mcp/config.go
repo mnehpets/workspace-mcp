@@ -1,9 +1,9 @@
-// Package config loads and validates the server's YAML configuration.
+// config loads and validates the server's YAML configuration.
 //
 // The config is intentionally structured (a list of workspaces, each with its
 // own policy/read/grep settings), which is why it is YAML rather than a flat
 // KEY=value file. Secret values are never stored here — see secrets.go.
-package config
+package mcp
 
 import (
 	"bytes"
@@ -78,7 +78,7 @@ type LogConfig struct {
 // (KnownFields(true)) so typos fail fast rather than silently doing nothing.
 // It does not resolve secrets or validate semantics — call ResolveBearerTokens
 // and Validate after.
-func Load(path string) (*Config, error) {
+func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config %q: %w", path, err)

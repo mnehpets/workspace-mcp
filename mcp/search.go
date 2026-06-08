@@ -1,4 +1,4 @@
-package search
+package mcp
 
 import (
 	"bufio"
@@ -10,9 +10,7 @@ import (
 	"sync"
 
 	"github.com/bmatcuk/doublestar/v4"
-	"github.com/mnehpets/workspace-mcp/fsroot"
 	"github.com/mnehpets/workspace-mcp/grrep"
-	"github.com/mnehpets/workspace-mcp/policy"
 )
 
 // InvalidPatternError signals an uncompilable regex (a `where` predicate with
@@ -94,7 +92,7 @@ type SearchResult struct {
 // inside a frontmatter fence are split out from body matches. The result list is
 // path-sorted and capped at maxMatches (counting matched lines, or one per file
 // when there are no matches), with Truncated set when the cap drops a file.
-func Search(root *fsroot.Root, pol *policy.Policy, ig *grrep.IgnoreSet, req SearchRequest, workers, maxMatches int, readCap int64) (*SearchResult, error) {
+func Search(root *Root, pol *Policy, ig *grrep.IgnoreSet, req SearchRequest, workers, maxMatches int, readCap int64) (*SearchResult, error) {
 	matchers := make([]*grrep.Matcher, len(req.Where))
 	for i, p := range req.Where {
 		m, err := grrep.CompileMatcher(p.Text, grrep.MatchOpts{
@@ -116,7 +114,7 @@ func Search(root *fsroot.Root, pol *policy.Policy, ig *grrep.IgnoreSet, req Sear
 	glob := strings.TrimSpace(req.PathGlob)
 	if glob != "" {
 		base, _ := doublestar.SplitPattern(glob)
-		clean, err := fsroot.Clean(base)
+		clean, err := Clean(base)
 		if err != nil {
 			return nil, err
 		}
@@ -197,7 +195,7 @@ func Search(root *fsroot.Root, pol *policy.Policy, ig *grrep.IgnoreSet, req Sear
 //   - content search (predicates present): reads up to readCap, skips binary,
 //     requires every predicate to match, splits matches into body vs
 //     frontmatter-fence by line, and lifts metadata from the same buffer.
-func scanOne(root *fsroot.Root, fm fileMeta, matchers []*grrep.Matcher, req SearchRequest, readCap int64) (FileResult, bool) {
+func scanOne(root *Root, fm fileMeta, matchers []*grrep.Matcher, req SearchRequest, readCap int64) (FileResult, bool) {
 	rel := fm.Path
 	fr := FileResult{Path: rel, Size: fm.Size}
 

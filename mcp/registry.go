@@ -1,7 +1,4 @@
-// Package workspace builds and serves the registry of configured workspaces.
-// Each workspace is an independent os.Root sandbox with its own policy, ignore
-// set, and git-ness — permissions never cross between workspaces.
-package workspace
+package mcp
 
 import (
 	"bytes"
@@ -12,11 +9,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mnehpets/workspace-mcp/config"
-	"github.com/mnehpets/workspace-mcp/fsroot"
 	"github.com/mnehpets/workspace-mcp/gitaware"
 	"github.com/mnehpets/workspace-mcp/grrep"
-	"github.com/mnehpets/workspace-mcp/policy"
 )
 
 // ErrUnknownWorkspace is returned when a requested workspace name is not configured.
@@ -25,12 +19,12 @@ var ErrUnknownWorkspace = errors.New("unknown workspace")
 // Workspace is one configured directory tree and its per-workspace settings.
 type Workspace struct {
 	Name           string
-	Root           *fsroot.Root
-	Policy         *policy.Policy
+	Root           *Root
+	Policy         *Policy
 	Ignore         *grrep.IgnoreSet // nil when respectGitignore is disabled
 	IsGitRepo      bool
-	Read           config.ReadConfig
-	Grep           config.GrepConfig
+	Read           ReadConfig
+	Grep           GrepConfig
 	Description    string   // what the tree is for; config-supplied or README-derived. May be empty.
 	WellKnownFiles []string // orientation files present at the root (subset of wellKnownCandidates).
 }
@@ -43,11 +37,11 @@ type Registry struct {
 
 // Build constructs the registry from config, opening one os.Root per workspace
 // and detecting git-ness. The caller owns Close.
-func Build(cfg *config.Config) (*Registry, error) {
+func Build(cfg *Config) (*Registry, error) {
 	reg := &Registry{byName: make(map[string]*Workspace, len(cfg.Workspaces))}
 	for i := range cfg.Workspaces {
 		wc := cfg.Workspaces[i]
-		root, err := fsroot.Open(wc.Root)
+		root, err := Open(wc.Root)
 		if err != nil {
 			reg.Close()
 			return nil, fmt.Errorf("workspace %q: open root: %w", wc.Name, err)
@@ -56,7 +50,7 @@ func Build(cfg *config.Config) (*Registry, error) {
 		if wc.RespectGitignore {
 			ig = grrep.NewIgnoreSet(wc.Root)
 		}
-		pol := policy.New(wc.Policy.AllowGlobs, wc.Policy.BlockGlobs)
+		pol := NewPolicy(wc.Policy.AllowGlobs, wc.Policy.BlockGlobs)
 		ws := &Workspace{
 			Name:      wc.Name,
 			Root:      root,
@@ -102,7 +96,7 @@ const maxWellKnownFiles = 5
 // A candidate must be a regular file (symlinks/dirs skipped) whose lowercased,
 // extension-stripped name is a known stem and that clears policy. Presence only
 // — it never reads content.
-func detectOrientation(root *fsroot.Root, pol *policy.Policy) []string {
+func detectOrientation(root *Root, pol *Policy) []string {
 	rank := make(map[string]int, len(orientationStems))
 	for i, s := range orientationStems {
 		rank[s] = i
@@ -152,7 +146,7 @@ func detectOrientation(root *fsroot.Root, pol *policy.Policy) []string {
 // capped. Files are tried in priority order; the first that yields usable,
 // non-binary prose wins. Reads ride the workspace's os.Root (symlink-safe);
 // files were already policy-gated by detectOrientation.
-func deriveDescription(root *fsroot.Root, files []string) string {
+func deriveDescription(root *Root, files []string) string {
 	for _, name := range files {
 		f, err := root.Open(name)
 		if err != nil {

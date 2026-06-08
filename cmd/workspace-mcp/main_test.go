@@ -10,10 +10,8 @@ import (
 
 	"github.com/mnehpets/http/endpoint"
 	"github.com/mnehpets/http/jsonrpc"
-	"github.com/mnehpets/workspace-mcp/audit"
-	"github.com/mnehpets/workspace-mcp/config"
+
 	"github.com/mnehpets/workspace-mcp/mcp"
-	"github.com/mnehpets/workspace-mcp/workspace"
 )
 
 func TestStdioLoop(t *testing.T) {
@@ -21,18 +19,18 @@ func TestStdioLoop(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Hi\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{Workspaces: []config.WorkspaceConfig{{
+	cfg := &mcp.Config{Workspaces: []mcp.WorkspaceConfig{{
 		Name: "default", Root: dir,
-		Policy: config.PolicyConfig{AllowGlobs: []string{"**/*.md"}},
-		Read:   config.ReadConfig{MaxBytes: 1000},
+		Policy: mcp.PolicyConfig{AllowGlobs: []string{"**/*.md"}},
+		Read:   mcp.ReadConfig{MaxBytes: 1000},
 	}}}
-	reg, err := workspace.Build(cfg)
+	reg, err := mcp.Build(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer reg.Close()
 
-	server := mcp.NewServer(reg, audit.New("error", &bytes.Buffer{}))
+	server := mcp.NewServer(reg, mcp.NewLogger("error", &bytes.Buffer{}))
 	rpc := jsonrpc.NewEndpoint()
 	server.Register(rpc)
 	handler := endpoint.Handler(rpc.Endpoint)

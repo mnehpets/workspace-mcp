@@ -1,9 +1,9 @@
-// Package fsroot wraps os.Root to give every workspace a hard, symlink-safe,
+// Root wraps os.Root to give every workspace a hard, symlink-safe,
 // TOCTOU-safe filesystem boundary. All model-supplied paths cross the boundary
 // here: they are workspace-relative, slash-separated, and resolved through the
 // underlying *os.Root, which guarantees the result stays within the root even in
 // the presence of symlinks.
-package fsroot
+package mcp
 
 import (
 	"errors"

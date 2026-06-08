@@ -6,13 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mnehpets/workspace-mcp/config"
-	"github.com/mnehpets/workspace-mcp/workspace"
+	"github.com/mnehpets/workspace-mcp/mcp"
 )
 
 // buildWS builds a single-"default"-workspace registry rooted at a temp dir
 // seeded with the given relative→content files, under the given allow globs.
-func buildWS(t *testing.T, files map[string]string, allow []string, desc string) *workspace.Workspace {
+func buildWS(t *testing.T, files map[string]string, allow []string, desc string) *mcp.Workspace {
 	t.Helper()
 	dir := t.TempDir()
 	for rel, content := range files {
@@ -24,12 +23,12 @@ func buildWS(t *testing.T, files map[string]string, allow []string, desc string)
 			t.Fatal(err)
 		}
 	}
-	cfg := &config.Config{Workspaces: []config.WorkspaceConfig{{
+	cfg := &mcp.Config{Workspaces: []mcp.WorkspaceConfig{{
 		Name: "default", Root: dir, Description: desc,
-		Policy: config.PolicyConfig{AllowGlobs: allow},
-		Read:   config.ReadConfig{MaxBytes: 100000},
+		Policy: mcp.PolicyConfig{AllowGlobs: allow},
+		Read:   mcp.ReadConfig{MaxBytes: 100000},
 	}}}
-	reg, err := workspace.Build(cfg)
+	reg, err := mcp.Build(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

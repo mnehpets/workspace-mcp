@@ -1,7 +1,7 @@
-// Package audit provides a structured logger for the server. It is designed so
+// Log provides a structured logger for the server. It is designed so
 // that secrets (the bearer token) and file contents are never written to the
 // log: there is simply no code path that passes either into it.
-package audit
+package mcp
 
 import (
 	"io"
@@ -14,9 +14,9 @@ type Logger struct {
 	slog *slog.Logger
 }
 
-// New builds a Logger writing to w at the given level ("debug"|"info"|"warn"|
+// NewLogger builds a Logger writing to w at the given level ("debug"|"info"|"warn"|
 // "error"; anything else defaults to info).
-func New(level string, w io.Writer) *Logger {
+func NewLogger(level string, w io.Writer) *Logger {
 	var lvl slog.Level
 	switch strings.ToLower(level) {
 	case "debug":

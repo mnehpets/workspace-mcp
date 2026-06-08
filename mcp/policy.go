@@ -1,9 +1,9 @@
-// Package policy is the soft, per-workspace allow/deny layer that sits on top of
+// Policy is the soft, per-workspace allow/deny layer that sits on top of
 // the hard os.Root containment boundary. Containment decides what is reachable;
 // policy decides what, among the reachable, is actually served. Block always
 // wins, and a dotfile backstop denies hidden paths that no explicit allow glob
 // names.
-package policy
+package mcp
 
 import (
 	"strings"
@@ -19,7 +19,7 @@ type Decision struct {
 	Reason string
 }
 
-var allowed = Decision{Allowed: true}
+var decisionAllowed = Decision{Allowed: true}
 
 // Policy holds one workspace's allow/block globs.
 type Policy struct {
@@ -27,12 +27,12 @@ type Policy struct {
 	block []string
 }
 
-// New builds a Policy. Globs are doublestar patterns (validated at config load).
-func New(allow, block []string) *Policy {
+// NewPolicy builds a Policy. Globs are doublestar patterns (validated at config load).
+func NewPolicy(allow, block []string) *Policy {
 	return &Policy{allow: allow, block: block}
 }
 
-func match(globs []string, rel string) bool {
+func matchGlobs(globs []string, rel string) bool {
 	for _, g := range globs {
 		if ok, _ := doublestar.Match(g, rel); ok {
 			return true
@@ -52,23 +52,23 @@ func hasDotSegment(rel string) bool {
 
 // CheckFile decides whether a file's content may be served (file_read, grep
 // match, find result). rel must already be a clean workspace-relative path
-// (see fsroot.Clean). A file must clear block, the dotfile backstop, and the
+// (see Clean). A file must clear block, the dotfile backstop, and the
 // allow list.
 func (p *Policy) CheckFile(rel string) Decision {
 	if rel == "." {
 		return Decision{false, "not_allowlisted"}
 	}
-	if match(p.block, rel) {
+	if matchGlobs(p.block, rel) {
 		return Decision{false, "blocked_glob"}
 	}
-	explicitlyAllowed := match(p.allow, rel)
+	explicitlyAllowed := matchGlobs(p.allow, rel)
 	if hasDotSegment(rel) && !explicitlyAllowed {
 		return Decision{false, "dotfile"}
 	}
 	if len(p.allow) > 0 && !explicitlyAllowed {
 		return Decision{false, "not_allowlisted"}
 	}
-	return allowed
+	return decisionAllowed
 }
 
 // CheckDir decides whether a directory may be listed or traversed. Directories
@@ -77,13 +77,13 @@ func (p *Policy) CheckFile(rel string) Decision {
 // listable.
 func (p *Policy) CheckDir(rel string) Decision {
 	if rel == "." {
-		return allowed
+		return decisionAllowed
 	}
-	if match(p.block, rel) {
+	if matchGlobs(p.block, rel) {
 		return Decision{false, "blocked_glob"}
 	}
-	if hasDotSegment(rel) && !match(p.allow, rel) {
+	if hasDotSegment(rel) && !matchGlobs(p.allow, rel) {
 		return Decision{false, "dotfile"}
 	}
-	return allowed
+	return decisionAllowed
 }

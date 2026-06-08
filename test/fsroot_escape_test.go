@@ -7,12 +7,12 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/mnehpets/workspace-mcp/fsroot"
+	"github.com/mnehpets/workspace-mcp/mcp"
 )
 
 // buildTree creates a sandbox tree with a known file and returns the root dir
-// plus an opened *fsroot.Root.
-func buildTree(t *testing.T) (string, *fsroot.Root) {
+// plus an opened *mcp.Root.
+func buildTree(t *testing.T) (string, *mcp.Root) {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "inside.txt"), []byte("in-tree content"), 0o600); err != nil {
@@ -24,7 +24,7 @@ func buildTree(t *testing.T) (string, *fsroot.Root) {
 	if err := os.WriteFile(filepath.Join(dir, "sub", "nested.txt"), []byte("nested"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r, err := fsroot.Open(dir)
+	r, err := mcp.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

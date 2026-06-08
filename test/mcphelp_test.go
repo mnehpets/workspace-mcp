@@ -10,10 +10,8 @@ import (
 
 	"github.com/mnehpets/http/endpoint"
 	"github.com/mnehpets/http/jsonrpc"
-	"github.com/mnehpets/workspace-mcp/audit"
-	"github.com/mnehpets/workspace-mcp/auth"
+
 	"github.com/mnehpets/workspace-mcp/mcp"
-	"github.com/mnehpets/workspace-mcp/workspace"
 )
 
 type rpcResponse struct {
@@ -43,15 +41,15 @@ type mcpFixture struct {
 	logs  *bytes.Buffer
 }
 
-func newMCPFixture(t *testing.T, reg *workspace.Registry) *mcpFixture {
+func newMCPFixture(t *testing.T, reg *mcp.Registry) *mcpFixture {
 	t.Helper()
 	const token = "0123456789abcdef0123456789abcdef"
 	logs := &bytes.Buffer{}
-	log := audit.New("info", logs)
+	log := mcp.NewLogger("info", logs)
 	server := mcp.NewServer(reg, log)
 	rpc := jsonrpc.NewEndpoint()
 	server.Register(rpc)
-	bearer := auth.NewBearer([]string{token}, log)
+	bearer := mcp.NewBearer([]string{token}, log)
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /mcp", endpoint.Handler(rpc.Endpoint, bearer))

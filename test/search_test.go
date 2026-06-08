@@ -7,16 +7,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mnehpets/workspace-mcp/fsroot"
 	"github.com/mnehpets/workspace-mcp/grrep"
-	"github.com/mnehpets/workspace-mcp/policy"
-	"github.com/mnehpets/workspace-mcp/search"
+	"github.com/mnehpets/workspace-mcp/mcp"
 )
 
 // searchTree seeds a small workspace exercising every filter: an allowed go and
 // markdown file, a frontmatter-bearing note, a policy-blocked key, a
 // gitignored vendored file, and a binary blob.
-func searchTree(t *testing.T) (*fsroot.Root, *policy.Policy, *grrep.IgnoreSet) {
+func searchTree(t *testing.T) (*mcp.Root, *mcp.Policy, *grrep.IgnoreSet) {
 	t.Helper()
 	dir := t.TempDir()
 	write := func(rel, content string) {
@@ -39,26 +37,26 @@ func searchTree(t *testing.T) (*fsroot.Root, *policy.Policy, *grrep.IgnoreSet) {
 	write(".gitignore", "vendor/\n")
 	write("bin.dat", "abc\x00TODO\x00def\n") // binary, must be skipped
 
-	r, err := fsroot.Open(dir)
+	r, err := mcp.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { r.Close() })
-	pol := policy.New([]string{"**/*.go", "**/*.md"}, []string{"**/*.key"})
+	pol := mcp.NewPolicy([]string{"**/*.go", "**/*.md"}, []string{"**/*.key"})
 	ig := grrep.NewIgnoreSet(dir)
 	return r, pol, ig
 }
 
-func search1(text string, fixed bool) search.SearchRequest {
-	return search.SearchRequest{
-		Where:          []search.Predicate{{Text: text, FixedString: fixed}},
+func search1(text string, fixed bool) mcp.SearchRequest {
+	return mcp.SearchRequest{
+		Where:          []mcp.Predicate{{Text: text, FixedString: fixed}},
 		IncludeMatches: true,
 	}
 }
 
-func run(t *testing.T, r *fsroot.Root, pol *policy.Policy, ig *grrep.IgnoreSet, req search.SearchRequest, max int) *search.SearchResult {
+func run(t *testing.T, r *mcp.Root, pol *mcp.Policy, ig *grrep.IgnoreSet, req mcp.SearchRequest, max int) *mcp.SearchResult {
 	t.Helper()
-	res, err := search.Search(r, pol, ig, req, 0, max, 1<<20)
+	res, err := mcp.Search(r, pol, ig, req, 0, max, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,8 +95,8 @@ func TestSearchRegexBody(t *testing.T) {
 
 func TestSearchCaseInsensitive(t *testing.T) {
 	r, pol, ig := searchTree(t)
-	req := search.SearchRequest{
-		Where:          []search.Predicate{{Text: "asc workflow", FixedString: true, CaseInsensitive: true}},
+	req := mcp.SearchRequest{
+		Where:          []mcp.Predicate{{Text: "asc workflow", FixedString: true, CaseInsensitive: true}},
 		IncludeMatches: true,
 	}
 	res := run(t, r, pol, ig, req, 500)
@@ -109,8 +107,8 @@ func TestSearchCaseInsensitive(t *testing.T) {
 
 func TestSearchInvalidPattern(t *testing.T) {
 	r, pol, ig := searchTree(t)
-	_, err := search.Search(r, pol, ig, search1("func (", false), 0, 500, 1<<20)
-	if _, ok := err.(*search.InvalidPatternError); !ok {
+	_, err := mcp.Search(r, pol, ig, search1("func (", false), 0, 500, 1<<20)
+	if _, ok := err.(*mcp.InvalidPatternError); !ok {
 		t.Fatalf("expected InvalidPatternError, got %v", err)
 	}
 }
@@ -118,8 +116,8 @@ func TestSearchInvalidPattern(t *testing.T) {
 // Multiple predicates are AND-combined: only a file containing BOTH qualifies.
 func TestSearchMultiPredicateAND(t *testing.T) {
 	r, pol, ig := searchTree(t)
-	both := search.SearchRequest{
-		Where: []search.Predicate{
+	both := mcp.SearchRequest{
+		Where: []mcp.Predicate{
 			{Text: "Reservoir", FixedString: true},
 			{Text: "title", FixedString: true},
 		},
@@ -130,8 +128,8 @@ func TestSearchMultiPredicateAND(t *testing.T) {
 		t.Fatalf("AND should select only west.md, got %+v", res.Files)
 	}
 	// And a predicate no file satisfies alongside one that some do → no results.
-	none := search.SearchRequest{
-		Where: []search.Predicate{
+	none := mcp.SearchRequest{
+		Where: []mcp.Predicate{
 			{Text: "Reservoir", FixedString: true},
 			{Text: "no-such-token", FixedString: true},
 		},
@@ -147,9 +145,9 @@ func TestSearchMultiPredicateAND(t *testing.T) {
 // matches. "california" appears in both regions of west.md.
 func TestSearchFenceSplit(t *testing.T) {
 	r, pol, ig := searchTree(t)
-	req := search.SearchRequest{
+	req := mcp.SearchRequest{
 		PathGlob:       "docs/west.md",
-		Where:          []search.Predicate{{Text: "california", FixedString: true, CaseInsensitive: true}},
+		Where:          []mcp.Predicate{{Text: "california", FixedString: true, CaseInsensitive: true}},
 		IncludeMatches: true,
 	}
 	res := run(t, r, pol, ig, req, 500)
@@ -169,12 +167,12 @@ func TestSearchFenceSplit(t *testing.T) {
 // gets none.
 func TestSearchIncludeMetadata(t *testing.T) {
 	r, pol, ig := searchTree(t)
-	req := search.SearchRequest{
+	req := mcp.SearchRequest{
 		PathGlob:        "docs/*.md",
 		IncludeMetadata: true,
 	}
 	res := run(t, r, pol, ig, req, 500)
-	byPath := map[string]search.FileResult{}
+	byPath := map[string]mcp.FileResult{}
 	for _, f := range res.Files {
 		byPath[f.Path] = f
 	}
@@ -202,17 +200,17 @@ func TestSearchMetadataLargeBody(t *testing.T) {
 		[]byte("---\ntitle: Big Doc\n---\n"+body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r, err := fsroot.Open(dir)
+	r, err := mcp.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { r.Close() })
-	pol := policy.New([]string{"**/*.md"}, nil)
+	pol := mcp.NewPolicy([]string{"**/*.md"}, nil)
 	ig := grrep.NewIgnoreSet(dir)
-	req := search.SearchRequest{IncludeMetadata: true}
+	req := mcp.SearchRequest{IncludeMetadata: true}
 
 	// Generous read cap: the small fence is lifted despite the multi-MiB body.
-	res, err := search.Search(r, pol, ig, req, 0, 500, 1<<20)
+	res, err := mcp.Search(r, pol, ig, req, 0, 500, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +220,7 @@ func TestSearchMetadataLargeBody(t *testing.T) {
 
 	// Read cap smaller than the fence itself: it never closes within the probe,
 	// so no metadata — but the file is still listed.
-	res, err = search.Search(r, pol, ig, req, 0, 500, 8)
+	res, err = mcp.Search(r, pol, ig, req, 0, 500, 8)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +233,7 @@ func TestSearchMetadataLargeBody(t *testing.T) {
 // and does not require grep to be enabled.
 func TestSearchEnumeration(t *testing.T) {
 	r, pol, ig := searchTree(t)
-	res := run(t, r, pol, ig, search.SearchRequest{PathGlob: "docs/**/*.md"}, 500)
+	res := run(t, r, pol, ig, mcp.SearchRequest{PathGlob: "docs/**/*.md"}, 500)
 	got := map[string]bool{}
 	for _, f := range res.Files {
 		got[f.Path] = true
@@ -262,7 +260,7 @@ func TestSearchEnumerationDepth(t *testing.T) {
 	r, pol, ig := searchTree(t)
 
 	whole := func(glob string) map[string]bool {
-		res := run(t, r, pol, ig, search.SearchRequest{PathGlob: glob}, 500)
+		res := run(t, r, pol, ig, mcp.SearchRequest{PathGlob: glob}, 500)
 		got := map[string]bool{}
 		for _, f := range res.Files {
 			got[f.Path] = true
@@ -293,8 +291,8 @@ func TestSearchEnumerationDepth(t *testing.T) {
 // includeMatches=false returns paths only even when predicates match.
 func TestSearchIncludeMatchesToggle(t *testing.T) {
 	r, pol, ig := searchTree(t)
-	req := search.SearchRequest{
-		Where:          []search.Predicate{{Text: "TODO", FixedString: true}},
+	req := mcp.SearchRequest{
+		Where:          []mcp.Predicate{{Text: "TODO", FixedString: true}},
 		IncludeMatches: false,
 	}
 	res := run(t, r, pol, ig, req, 500)
@@ -329,15 +327,15 @@ func TestSearchConcurrentWalkRace(t *testing.T) {
 			}
 		}
 	}
-	r, err := fsroot.Open(dir)
+	r, err := mcp.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { r.Close() })
-	pol := policy.New([]string{"**/*.md"}, nil)
+	pol := mcp.NewPolicy([]string{"**/*.md"}, nil)
 	ig := grrep.NewIgnoreSet(dir)
 
-	res := run(t, r, pol, ig, search.SearchRequest{}, 10000) // enumerate everything
+	res := run(t, r, pol, ig, mcp.SearchRequest{}, 10000) // enumerate everything
 	if len(res.Files) != 40*25 {
 		t.Fatalf("expected %d files, got %d", 40*25, len(res.Files))
 	}
@@ -347,7 +345,7 @@ func TestSearchConcurrentWalkRace(t *testing.T) {
 func TestSearchTruncation(t *testing.T) {
 	r, pol, ig := searchTree(t)
 	// "line" appears in several markdown files; cap at 1 file.
-	res := run(t, r, pol, ig, search1("line", true), 1)
+	res := run(t, r, pol, ig, mcp.SearchRequest{Where: []mcp.Predicate{{Text: "line", FixedString: true}}}, 1)
 	if !res.Truncated {
 		t.Fatal("expected truncated=true at the cap")
 	}

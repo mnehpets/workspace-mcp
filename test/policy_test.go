@@ -3,11 +3,11 @@ package test
 import (
 	"testing"
 
-	"github.com/mnehpets/workspace-mcp/policy"
+	"github.com/mnehpets/workspace-mcp/mcp"
 )
 
-func newTestPolicy() *policy.Policy {
-	return policy.New(
+func newTestPolicy() *mcp.Policy {
+	return mcp.NewPolicy(
 		[]string{"**/*.md", "**/*.go", "docs/**", "README*"},
 		[]string{".git/**", "**/.env", "**/.env.*", "**/*secret*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/.ssh/**", "**/node_modules/**"},
 	)

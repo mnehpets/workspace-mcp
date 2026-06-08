@@ -11,13 +11,12 @@ import (
 
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/mnehpets/workspace-mcp/config"
-	"github.com/mnehpets/workspace-mcp/workspace"
+	"github.com/mnehpets/workspace-mcp/mcp"
 )
 
 // integrationRegistry builds a git "default" workspace and a non-git "notes"
 // workspace with sample files, a blocked .env, and an outward symlink.
-func integrationRegistry(t *testing.T) *workspace.Registry {
+func integrationRegistry(t *testing.T) *mcp.Registry {
 	t.Helper()
 	gitDir := t.TempDir()
 	notesDir := t.TempDir()
@@ -62,26 +61,26 @@ func integrationRegistry(t *testing.T) *workspace.Registry {
 	// --- notes workspace (not git) ---
 	write(notesDir, "todo.md", "buy milk\n")
 
-	cfg := &config.Config{
-		Workspaces: []config.WorkspaceConfig{
+	cfg := &mcp.Config{
+		Workspaces: []mcp.WorkspaceConfig{
 			{
 				Name: "default", Root: gitDir, RespectGitignore: true,
-				Policy: config.PolicyConfig{
+				Policy: mcp.PolicyConfig{
 					AllowGlobs: []string{"**/*.md", "**/*.go", "README*"},
 					BlockGlobs: []string{".git/**", "**/.env", "**/.env.*"},
 				},
-				Read: config.ReadConfig{MaxBytes: 100000},
-				Grep: config.GrepConfig{Enabled: true, MaxMatches: 500},
+				Read: mcp.ReadConfig{MaxBytes: 100000},
+				Grep: mcp.GrepConfig{Enabled: true, MaxMatches: 500},
 			},
 			{
 				Name: "notes", Root: notesDir, RespectGitignore: false,
-				Policy: config.PolicyConfig{AllowGlobs: []string{"**/*.md"}},
-				Read:   config.ReadConfig{MaxBytes: 100000},
-				Grep:   config.GrepConfig{Enabled: false},
+				Policy: mcp.PolicyConfig{AllowGlobs: []string{"**/*.md"}},
+				Read:   mcp.ReadConfig{MaxBytes: 100000},
+				Grep:   mcp.GrepConfig{Enabled: false},
 			},
 		},
 	}
-	reg, err := workspace.Build(cfg)
+	reg, err := mcp.Build(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

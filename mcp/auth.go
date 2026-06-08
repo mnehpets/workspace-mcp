@@ -1,6 +1,6 @@
-// Package auth provides a bearer-token Processor for the mnehpets/http endpoint
-// chain. Authentication is server-wide (AuthN); per-workspace policy is AuthZ.
-package auth
+// Bearer-token authentication for the mnehpets/http endpoint chain.
+// Authentication is server-wide (AuthN); per-workspace policy is AuthZ.
+package mcp
 
 import (
 	"crypto/sha256"
@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/mnehpets/http/endpoint"
-	"github.com/mnehpets/workspace-mcp/audit"
 )
 
 // Bearer is an endpoint.Processor that requires a valid bearer token. It accepts
@@ -21,12 +20,12 @@ import (
 // wrong. Tokens are never logged.
 type Bearer struct {
 	expected [][32]byte
-	log      *audit.Logger
+	log      *Logger
 }
 
 // NewBearer builds a Bearer processor accepting any of the given tokens. With an
 // empty slice every request is rejected (no token can match).
-func NewBearer(tokens []string, log *audit.Logger) *Bearer {
+func NewBearer(tokens []string, log *Logger) *Bearer {
 	exp := make([][32]byte, len(tokens))
 	for i, t := range tokens {
 		exp[i] = sha256.Sum256([]byte(t))

@@ -1,7 +1,4 @@
-// Package search drives content (grep) and filename (find) search over a
-// workspace, filtered by its policy and ignore set, with every leaf opened
-// through the workspace's os.Root sandbox.
-package search
+package mcp
 
 import (
 	"errors"
@@ -11,9 +8,7 @@ import (
 	"sync"
 
 	"github.com/charlievieth/fastwalk"
-	"github.com/mnehpets/workspace-mcp/fsroot"
 	"github.com/mnehpets/workspace-mcp/grrep"
-	"github.com/mnehpets/workspace-mcp/policy"
 )
 
 // fileMeta is one regular file discovered by the walk: its workspace-relative
@@ -35,7 +30,7 @@ type fileMeta struct {
 // of shared state — the results slice and the (non-thread-safe) ignore tree — is
 // serialized under mu. The callback body is cheap; fastwalk's own stat/readdir
 // work stays parallel.
-func collectFiles(root *fsroot.Root, pol *policy.Policy, ig *grrep.IgnoreSet, startRel string) ([]fileMeta, error) {
+func collectFiles(root *Root, pol *Policy, ig *grrep.IgnoreSet, startRel string) ([]fileMeta, error) {
 	base := root.Dir()
 	absStart := base
 	if startRel != "." {

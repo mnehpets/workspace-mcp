@@ -10,11 +10,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/mnehpets/workspace-mcp/audit"
-	"github.com/mnehpets/workspace-mcp/fsroot"
 	"github.com/mnehpets/workspace-mcp/gitaware"
-	"github.com/mnehpets/workspace-mcp/search"
-	"github.com/mnehpets/workspace-mcp/workspace"
 )
 
 // Tool is one entry in the tools/list catalog.
@@ -140,7 +136,7 @@ func (s *Server) toolDefs() []Tool {
 }
 
 // resolveWS looks up a workspace, returning a *toolError on failure.
-func (s *Server) resolveWS(name string) (*workspace.Workspace, *toolError) {
+func (s *Server) resolveWS(name string) (*Workspace, *toolError) {
 	ws, err := s.reg.Get(name)
 	if err != nil {
 		return nil, mapWorkspaceError(err)
@@ -160,8 +156,8 @@ func unmarshalArgs(raw json.RawMessage, v any) error {
 
 // --- workspace_list ---
 
-func (s *Server) workspaceList(_ json.RawMessage) (any, audit.ToolEvent, error) {
-	ev := audit.ToolEvent{}
+func (s *Server) workspaceList(_ json.RawMessage) (any, ToolEvent, error) {
+	ev := ToolEvent{}
 	type wsInfo struct {
 		Name           string   `json:"name"`
 		IsGitRepo      bool     `json:"isGitRepo"`
@@ -212,9 +208,9 @@ const (
 	searchTruncatedNotice = "Results truncated at the match cap. Narrow `path` to a tighter glob, or add a more specific `where` predicate (and `wordBoundary`)."
 )
 
-func (s *Server) fileRead(args json.RawMessage) (any, audit.ToolEvent, error) {
+func (s *Server) fileRead(args json.RawMessage) (any, ToolEvent, error) {
 	var a fileReadArgs
-	ev := audit.ToolEvent{}
+	ev := ToolEvent{}
 	if err := unmarshalArgs(args, &a); err != nil {
 		return nil, ev, err
 	}
@@ -223,7 +219,7 @@ func (s *Server) fileRead(args json.RawMessage) (any, audit.ToolEvent, error) {
 	if te != nil {
 		return nil, ev, te
 	}
-	clean, err := fsroot.Clean(a.Path)
+	clean, err := Clean(a.Path)
 	if err != nil {
 		return nil, ev, mapPathError(err)
 	}
@@ -405,9 +401,9 @@ type wherePredicate struct {
 	WordBoundary    bool   `json:"wordBoundary"`
 }
 
-func (s *Server) treeSearch(args json.RawMessage) (any, audit.ToolEvent, error) {
+func (s *Server) treeSearch(args json.RawMessage) (any, ToolEvent, error) {
 	var a treeSearchArgs
-	ev := audit.ToolEvent{}
+	ev := ToolEvent{}
 	if err := unmarshalArgs(args, &a); err != nil {
 		return nil, ev, err
 	}
@@ -421,7 +417,7 @@ func (s *Server) treeSearch(args json.RawMessage) (any, audit.ToolEvent, error) 
 	if len(a.Where) > 0 && !ws.Grep.Enabled {
 		return nil, ev, newToolError("GREP_DISABLED", "grep is disabled for this workspace")
 	}
-	preds := make([]search.Predicate, 0, len(a.Where))
+	preds := make([]Predicate, 0, len(a.Where))
 	for _, w := range a.Where {
 		if strings.TrimSpace(w.Text) == "" {
 			return nil, ev, newToolError("INVALID_ARGS", "each `where` predicate needs non-empty text")
@@ -430,7 +426,7 @@ func (s *Server) treeSearch(args json.RawMessage) (any, audit.ToolEvent, error) 
 		if w.FixedString != nil {
 			fixed = *w.FixedString
 		}
-		preds = append(preds, search.Predicate{
+		preds = append(preds, Predicate{
 			Text:            w.Text,
 			FixedString:     fixed,
 			CaseInsensitive: w.CaseInsensitive,
@@ -444,7 +440,7 @@ func (s *Server) treeSearch(args json.RawMessage) (any, audit.ToolEvent, error) 
 	if a.Path != "" {
 		ev.Paths = []string{a.Path}
 	}
-	res, err := search.Search(ws.Root, ws.Policy, ws.Ignore, search.SearchRequest{
+	res, err := Search(ws.Root, ws.Policy, ws.Ignore, SearchRequest{
 		PathGlob:        a.Path,
 		Where:           preds,
 		IncludeMatches:  includeMatches,
@@ -466,9 +462,9 @@ type gitStatusArgs struct {
 	Workspace string `json:"workspace"`
 }
 
-func (s *Server) gitStatus(args json.RawMessage) (any, audit.ToolEvent, error) {
+func (s *Server) gitStatus(args json.RawMessage) (any, ToolEvent, error) {
 	var a gitStatusArgs
-	ev := audit.ToolEvent{}
+	ev := ToolEvent{}
 	if err := unmarshalArgs(args, &a); err != nil {
 		return nil, ev, err
 	}

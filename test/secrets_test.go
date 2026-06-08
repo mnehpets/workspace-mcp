@@ -5,12 +5,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/mnehpets/workspace-mcp/config"
+	"github.com/mnehpets/workspace-mcp/mcp"
 )
 
 func TestSecretRefResolveEnv(t *testing.T) {
 	env := map[string]string{"TOK": "value-from-env"}
-	ref := config.SecretRef{Env: "TOK"}
+	ref := mcp.SecretRef{Env: "TOK"}
 	got, err := ref.Resolve(env)
 	if err != nil {
 		t.Fatal(err)
@@ -21,16 +21,16 @@ func TestSecretRefResolveEnv(t *testing.T) {
 }
 
 func TestSecretRefMissingIsError(t *testing.T) {
-	if _, err := (config.SecretRef{Env: "NOPE"}).Resolve(map[string]string{}); err == nil {
+	if _, err := (mcp.SecretRef{Env: "NOPE"}).Resolve(map[string]string{}); err == nil {
 		t.Fatal("expected error for missing env var")
 	}
-	if _, err := (config.SecretRef{Env: "EMPTY"}).Resolve(map[string]string{"EMPTY": ""}); err == nil {
+	if _, err := (mcp.SecretRef{Env: "EMPTY"}).Resolve(map[string]string{"EMPTY": ""}); err == nil {
 		t.Fatal("expected error for empty env var")
 	}
 }
 
 func TestSecretRefLiteral(t *testing.T) {
-	got, err := (config.SecretRef{Literal: "inline"}).Resolve(nil)
+	got, err := (mcp.SecretRef{Literal: "inline"}).Resolve(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestSecretRefLiteral(t *testing.T) {
 }
 
 func TestResolveBearerTokensSingle(t *testing.T) {
-	c := &config.Config{Auth: config.AuthConfig{BearerToken: config.SecretRef{Env: "A"}}}
+	c := &mcp.Config{Auth: mcp.AuthConfig{BearerToken: mcp.SecretRef{Env: "A"}}}
 	got, err := c.ResolveBearerTokens(map[string]string{"A": "tok-a"})
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +51,7 @@ func TestResolveBearerTokensSingle(t *testing.T) {
 }
 
 func TestResolveBearerTokensPlural(t *testing.T) {
-	c := &config.Config{Auth: config.AuthConfig{BearerTokens: []config.SecretRef{
+	c := &mcp.Config{Auth: mcp.AuthConfig{BearerTokens: []mcp.SecretRef{
 		{Env: "OLD"}, {Env: "NEW"},
 	}}}
 	got, err := c.ResolveBearerTokens(map[string]string{"OLD": "old-tok", "NEW": "new-tok"})
@@ -64,9 +64,9 @@ func TestResolveBearerTokensPlural(t *testing.T) {
 }
 
 func TestResolveBearerTokensBothSetIsError(t *testing.T) {
-	c := &config.Config{Auth: config.AuthConfig{
-		BearerToken:  config.SecretRef{Env: "A"},
-		BearerTokens: []config.SecretRef{{Env: "B"}},
+	c := &mcp.Config{Auth: mcp.AuthConfig{
+		BearerToken:  mcp.SecretRef{Env: "A"},
+		BearerTokens: []mcp.SecretRef{{Env: "B"}},
 	}}
 	if _, err := c.ResolveBearerTokens(map[string]string{"A": "x", "B": "y"}); err == nil {
 		t.Fatal("expected error when both bearerToken and bearerTokens are set")
@@ -74,7 +74,7 @@ func TestResolveBearerTokensBothSetIsError(t *testing.T) {
 }
 
 func TestResolveBearerTokensNoneSetIsError(t *testing.T) {
-	c := &config.Config{}
+	c := &mcp.Config{}
 	if _, err := c.ResolveBearerTokens(map[string]string{}); err == nil {
 		t.Fatal("expected error when no bearer token is configured")
 	}
@@ -89,7 +89,7 @@ func TestLoadEnvOSOverridesDotenv(t *testing.T) {
 	}
 	t.Setenv("SHARED", "from-os")
 
-	env, err := config.LoadEnv(envFile)
+	env, err := mcp.LoadEnv(envFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestLoadEnvOSOverridesDotenv(t *testing.T) {
 
 // A missing dotenv file is not an error (secrets may come from the OS env).
 func TestLoadEnvMissingFileOK(t *testing.T) {
-	env, err := config.LoadEnv(filepath.Join(t.TempDir(), "does-not-exist"))
+	env, err := mcp.LoadEnv(filepath.Join(t.TempDir(), "does-not-exist"))
 	if err != nil {
 		t.Fatalf("missing env file should not error: %v", err)
 	}

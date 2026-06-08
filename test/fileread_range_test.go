@@ -5,13 +5,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/mnehpets/workspace-mcp/config"
-	"github.com/mnehpets/workspace-mcp/workspace"
+	"github.com/mnehpets/workspace-mcp/mcp"
 )
 
 // rangeRegistry seeds a "default" workspace with a 10-line text file and a
 // NUL-containing binary file, both allowed.
-func rangeRegistry(t *testing.T) *workspace.Registry {
+func rangeRegistry(t *testing.T) *mcp.Registry {
 	t.Helper()
 	dir := t.TempDir()
 	// ten.md: "line1\nline2\n...\nline10\n"
@@ -25,12 +24,12 @@ func rangeRegistry(t *testing.T) *workspace.Registry {
 	if err := os.WriteFile(filepath.Join(dir, "bin.md"), []byte("ab\x00cd\nmore\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{Workspaces: []config.WorkspaceConfig{{
+	cfg := &mcp.Config{Workspaces: []mcp.WorkspaceConfig{{
 		Name: "default", Root: dir,
-		Policy: config.PolicyConfig{AllowGlobs: []string{"**/*.md"}},
-		Read:   config.ReadConfig{MaxBytes: 100000},
+		Policy: mcp.PolicyConfig{AllowGlobs: []string{"**/*.md"}},
+		Read:   mcp.ReadConfig{MaxBytes: 100000},
 	}}}
-	reg, err := workspace.Build(cfg)
+	reg, err := mcp.Build(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

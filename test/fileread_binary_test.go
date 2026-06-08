@@ -6,8 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/mnehpets/workspace-mcp/config"
-	"github.com/mnehpets/workspace-mcp/workspace"
+	"github.com/mnehpets/workspace-mcp/mcp"
 )
 
 // pngBytes is a minimal PNG: the 8-byte signature plus an IHDR chunk that
@@ -21,7 +20,7 @@ var pngBytes = []byte{
 
 // binaryRegistry seeds a "default" workspace with a .png, an extensionless copy
 // (for content sniffing), and a policy-blocked secret.png.
-func binaryRegistry(t *testing.T) *workspace.Registry {
+func binaryRegistry(t *testing.T) *mcp.Registry {
 	t.Helper()
 	dir := t.TempDir()
 	for _, name := range []string{"pic.png", "blob", "secret.png"} {
@@ -29,12 +28,12 @@ func binaryRegistry(t *testing.T) *workspace.Registry {
 			t.Fatal(err)
 		}
 	}
-	cfg := &config.Config{Workspaces: []config.WorkspaceConfig{{
+	cfg := &mcp.Config{Workspaces: []mcp.WorkspaceConfig{{
 		Name: "default", Root: dir,
-		Policy: config.PolicyConfig{AllowGlobs: []string{"**/*"}, BlockGlobs: []string{"**/secret.*"}},
-		Read:   config.ReadConfig{MaxBytes: 100000},
+		Policy: mcp.PolicyConfig{AllowGlobs: []string{"**/*"}, BlockGlobs: []string{"**/secret.*"}},
+		Read:   mcp.ReadConfig{MaxBytes: 100000},
 	}}}
-	reg, err := workspace.Build(cfg)
+	reg, err := mcp.Build(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
