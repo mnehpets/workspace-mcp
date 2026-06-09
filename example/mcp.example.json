@@ -5,6 +5,8 @@
       "command": "/src/workspace-mcp/workspace-mcp",
       "args": [
         "-stdio",
+        "-workspace",
+        "default",
         "-config",
         "/src/workspace-mcp/example/config.example.yaml"
       ]

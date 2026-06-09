@@ -125,7 +125,7 @@ func TestOrientationRootOnly(t *testing.T) {
 	}
 }
 
-// The reported list is capped so a noisy root can't flood workspace_list, and the
+// The reported list is capped so a noisy root can't flood workspace_info, and the
 // cap keeps the highest-priority stems.
 func TestOrientationCap(t *testing.T) {
 	ws := buildWS(t, map[string]string{

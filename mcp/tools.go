@@ -32,24 +32,6 @@ func readOnlyAnnotations(title string) map[string]any {
 	}
 }
 
-// workspaceProp builds the shared `workspace` schema property. It advertises the
-// configured workspace names and the default, so the model can omit it for the
-// common case (→ "default") or pick a valid one without a separate lookup.
-func workspaceProp(names []string) map[string]any {
-	desc := "Workspace to operate on. Optional — omit to use the \"default\" workspace."
-	if len(names) > 0 {
-		desc += " Available: " + strings.Join(names, ", ") + "."
-	}
-	p := map[string]any{
-		"type":        "string",
-		"description": desc,
-	}
-	if len(names) > 0 {
-		p["enum"] = names
-	}
-	return p
-}
-
 func schema(props map[string]any, required ...string) map[string]any {
 	s := map[string]any{
 		"type":                 "object",
@@ -62,33 +44,26 @@ func schema(props map[string]any, required ...string) map[string]any {
 	return s
 }
 
-// toolDefs returns the tool catalog. Tool identities/shapes are fixed, but the
-// `workspace` enum/description is populated from the configured workspaces so the
-// model sees the available names and the default. A tool may still fail per-call
-// for a given workspace (disabled grep, non-git tree).
+// toolDefs returns the tool catalog. The workspace is fixed by the endpoint URL
+// (§17), so no tool takes a `workspace` argument. A tool may still fail per-call
+// for this workspace (disabled grep, non-git tree).
 func (s *Server) toolDefs() []Tool {
-	names := make([]string, 0)
-	for _, w := range s.reg.List() {
-		names = append(names, w.Name)
-	}
-	wsProp := func() map[string]any { return workspaceProp(names) }
 	return []Tool{
 		{
-			Name: "workspace_list",
-			Description: "Start here. Lists the available workspaces (named local directory trees) you can operate on: each one's name, whether it is a git repository, a short description of what it is for, and which orientation files (e.g. README.md) exist at its root. " +
-				"Call this first to discover valid `workspace` values and pick one by intent, then orient yourself in it (read the listed orientation files) before using the other tools. No parameters.",
+			Name: "workspace_info",
+			Description: "Orientation for THIS workspace (the local directory tree this connector is pointed at): its name, whether it is a git repository, a short description of what it is for, which orientation files (e.g. README.md) exist at its root, an `orientation` string telling you how to use the tools, and a `preview` inlining the start of the top orientation file. " +
+				"The `orientation` string duplicates the instructions the server sends at connect time, so skip calling this just for those if you already received them — but the `preview` is NOT in those instructions, so call it to read the README/overview in one shot instead of a separate file_read. No parameters.",
 			InputSchema: schema(map[string]any{}),
-			Annotations: readOnlyAnnotations("List workspaces"),
+			Annotations: readOnlyAnnotations("Workspace info"),
 		},
 		{
 			Name: "file_read",
-			Description: "Read the contents of one file in a workspace. " +
+			Description: "Read the contents of one file in this workspace. " +
 				"Use it after locating a file with tree_search. " +
 				"Pass `startLine`/`endLine` to read only a span of a large file (the result reports `totalLines` so you can page through). " +
 				"Large reads are truncated at a byte cap (`truncated` is set; raise `maxBytes` up to the workspace limit). " +
 				"Binary files are flagged and not returned as text by default; set `allowBinary` to receive their raw bytes base64-encoded (with a `mimeType`) so you can parse them yourself.",
 			InputSchema: schema(map[string]any{
-				"workspace":   wsProp(),
 				"path":        map[string]any{"type": "string", "description": "Workspace-relative path to the file to read."},
 				"maxBytes":    map[string]any{"type": "integer", "description": "Optional cap on bytes returned (still bounded by the workspace's read limit). If more remains, the result is truncated."},
 				"startLine":   map[string]any{"type": "integer", "description": "Optional 1-based first line to return (inclusive). Omit to start at the beginning."},
@@ -99,15 +74,14 @@ func (s *Server) toolDefs() []Tool {
 		},
 		{
 			Name: "tree_search",
-			Description: "Find files in a workspace by path, by content, or both — also how you browse what exists. " +
+			Description: "Find files in this workspace by path, by content, or both — also how you browse what exists. " +
 				"Give `path` (a glob like \"docs/**/*.md\") to select candidate files by name/location, and/or `where` (a list of content predicates, AND-combined) to keep only files whose body contains all of them. " +
 				"With `path` alone and no `where` it just enumerates the matching files — use it to discover structure instead of a separate directory listing. To see the whole tree at once, omit `path` (or pass \"**/*\"); use \"*\" only for the root level and \"docs/**\" for a subtree (a single `*` does not cross directories). With `where` it searches their contents like grep. " +
 				"Returns a flat list of files, each with its `size` in bytes and the matched lines (`matches`); set `includeMatches=false` for paths only. " +
 				"Matches inside a leading `---`…`---` frontmatter block are reported separately as `metadataMatches`, and `includeMetadata=true` returns each file's raw frontmatter text — pass it while browsing to read titles/tags/summaries up front and pick the right files in a single call rather than judging by filename. " +
 				"Results are capped (see `truncated`) — narrow the `path` glob or add a more specific `where` predicate to cut noise.",
 			InputSchema: schema(map[string]any{
-				"workspace": wsProp(),
-				"path":      map[string]any{"type": "string", "description": "Glob selecting candidate files — both the search boundary and a name filter. Omit it (or use \"**/*\") to walk the ENTIRE tree recursively; that is usually what you want for \"show me everything\". `**` crosses directory boundaries, but a single `*` does NOT — so \"*\" lists only the root level, \"docs/*\" only the immediate children of docs/, while \"docs/**\" or \"docs/**/*.md\" reaches all descendants. Prefer `**` unless you deliberately want one level."},
+				"path": map[string]any{"type": "string", "description": "Glob selecting candidate files — both the search boundary and a name filter. Omit it (or use \"**/*\") to walk the ENTIRE tree recursively; that is usually what you want for \"show me everything\". `**` crosses directory boundaries, but a single `*` does NOT — so \"*\" lists only the root level, \"docs/*\" only the immediate children of docs/, while \"docs/**\" or \"docs/**/*.md\" reaches all descendants. Prefer `**` unless you deliberately want one level."},
 				"where": map[string]any{
 					"type":        "array",
 					"description": "Content predicates over each file's body, AND-combined: a file is returned only if every predicate matches at least one line. Omit to search by path alone (file enumeration). Requires the workspace's grep to be enabled.",
@@ -125,23 +99,12 @@ func (s *Server) toolDefs() []Tool {
 		},
 		{
 			Name: "git_status",
-			Description: "Show read-only git status — current branch and per-file change codes — for a workspace that is a git repository (otherwise returns NOT_A_GIT_REPO). " +
-				"Orientation only: it neither reads file contents nor modifies anything.",
-			InputSchema: schema(map[string]any{
-				"workspace": wsProp(),
-			}),
+			Description: "Show read-only git status — current branch and per-file change codes — when this workspace is a git repository (otherwise returns NOT_A_GIT_REPO). " +
+				"Orientation only: it neither reads file contents nor modifies anything. No parameters.",
+			InputSchema: schema(map[string]any{}),
 			Annotations: readOnlyAnnotations("Git status"),
 		},
 	}
-}
-
-// resolveWS looks up a workspace, returning a *toolError on failure.
-func (s *Server) resolveWS(name string) (*Workspace, *toolError) {
-	ws, err := s.reg.Get(name)
-	if err != nil {
-		return nil, mapWorkspaceError(err)
-	}
-	return ws, nil
 }
 
 func unmarshalArgs(raw json.RawMessage, v any) error {
@@ -154,32 +117,101 @@ func unmarshalArgs(raw json.RawMessage, v any) error {
 	return nil
 }
 
-// --- workspace_list ---
+// --- workspace_info ---
 
-func (s *Server) workspaceList(_ json.RawMessage) (any, ToolEvent, error) {
+// workspaceInfo returns this workspace's orientation — deliberately the *same*
+// payload delivered at initialize as `instructions` (§17). It exists as the
+// dependable tool-surface mirror for hosts that ignore the server `instructions`
+// string: `orientation` is that exact text, and the structured fields (name,
+// git-ness, description, detected orientation files) are the machine-readable
+// source the prose is built from. When a well-known file exists it also inlines a
+// capped preview of the highest-priority one, so the common "orient by reading the
+// README" move needs no follow-up file_read round-trip.
+func (s *Server) workspaceInfo(_ json.RawMessage) (any, ToolEvent, error) {
 	ev := ToolEvent{}
-	type wsInfo struct {
-		Name           string   `json:"name"`
-		IsGitRepo      bool     `json:"isGitRepo"`
-		Description    string   `json:"description,omitempty"`
-		WellKnownFiles []string `json:"wellKnownFiles,omitempty"`
+	w := s.ws
+	out := map[string]any{
+		"name":           w.Name,
+		"isGitRepo":      w.IsGitRepo,
+		"description":    w.Description,
+		"wellKnownFiles": w.WellKnownFiles,
+		"orientation":    workspaceInstructions(w),
 	}
-	list := []wsInfo{}
-	for _, w := range s.reg.List() {
-		list = append(list, wsInfo{
-			Name:           w.Name,
-			IsGitRepo:      w.IsGitRepo,
-			Description:    w.Description,
-			WellKnownFiles: w.WellKnownFiles,
-		})
+	if p := readOrientationPreview(w); p != nil {
+		out["preview"] = p
+		ev.Paths = []string{p.Path}
+		ev.Bytes = len(p.Content)
 	}
-	return map[string]any{"workspaces": list}, ev, nil
+	return out, ev, nil
+}
+
+// previewMaxLines / previewMaxBytes bound the inlined orientation-file preview:
+// enough to orient, not enough to dump a large file into every workspace_info.
+const (
+	previewMaxLines = 200
+	previewMaxBytes = 16 << 10
+)
+
+type orientationPreview struct {
+	Path       string `json:"path"`
+	Content    string `json:"content"`
+	Truncated  bool   `json:"truncated"`            // more file remains beyond the preview
+	TotalLines int    `json:"totalLines,omitempty"` // only when the whole file fit the byte window
+}
+
+// readOrientationPreview reads the first previewMaxLines (capped by bytes) of the
+// workspace's highest-priority well-known file, through its os.Root. The file was
+// already policy-gated at detection (detectOrientation). Returns nil when there is
+// no well-known file, the read fails, or the content looks binary.
+func readOrientationPreview(w *Workspace) *orientationPreview {
+	if len(w.WellKnownFiles) == 0 {
+		return nil
+	}
+	name := w.WellKnownFiles[0]
+	limit := int64(previewMaxBytes)
+	if w.Read.MaxBytes > 0 && w.Read.MaxBytes < limit {
+		limit = w.Read.MaxBytes
+	}
+	f, err := w.Root.Open(name)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	data := make([]byte, limit)
+	n, _ := io.ReadFull(f, data)
+	data = data[:n]
+	if bytes.IndexByte(data[:min(len(data), 8000)], 0) >= 0 {
+		return nil // binary; not a useful preview
+	}
+	// Does more content remain past the byte window?
+	moreBytes := false
+	var extra [1]byte
+	if k, _ := f.Read(extra[:]); k > 0 {
+		moreBytes = true
+	}
+
+	lines := splitLines(string(data))
+	total := len(lines)
+	truncated := moreBytes
+	if total > previewMaxLines {
+		lines = lines[:previewMaxLines]
+		truncated = true
+	}
+	p := &orientationPreview{
+		Path:      name,
+		Content:   strings.Join(lines, "\n"),
+		Truncated: truncated,
+	}
+	if !moreBytes { // line count is only trustworthy when the whole file fit
+		p.TotalLines = total
+	}
+	return p
 }
 
 // --- file_read ---
 
 type fileReadArgs struct {
-	Workspace   string `json:"workspace"`
 	Path        string `json:"path"`
 	MaxBytes    int64  `json:"maxBytes"`
 	StartLine   *int   `json:"startLine"`   // 1-based inclusive; nil = open-ended toward the start
@@ -214,11 +246,7 @@ func (s *Server) fileRead(args json.RawMessage) (any, ToolEvent, error) {
 	if err := unmarshalArgs(args, &a); err != nil {
 		return nil, ev, err
 	}
-	ev.Workspace = a.Workspace
-	ws, te := s.resolveWS(a.Workspace)
-	if te != nil {
-		return nil, ev, te
-	}
+	ws := s.ws
 	clean, err := Clean(a.Path)
 	if err != nil {
 		return nil, ev, mapPathError(err)
@@ -387,7 +415,6 @@ func splitLines(s string) []string {
 // --- tree_search ---
 
 type treeSearchArgs struct {
-	Workspace       string           `json:"workspace"`
 	Path            string           `json:"path"`  // glob; "" = whole tree
 	Where           []wherePredicate `json:"where"` // body predicates, AND-combined
 	IncludeMatches  *bool            `json:"includeMatches"`
@@ -407,11 +434,7 @@ func (s *Server) treeSearch(args json.RawMessage) (any, ToolEvent, error) {
 	if err := unmarshalArgs(args, &a); err != nil {
 		return nil, ev, err
 	}
-	ev.Workspace = a.Workspace
-	ws, te := s.resolveWS(a.Workspace)
-	if te != nil {
-		return nil, ev, te
-	}
+	ws := s.ws
 	// Content predicates require grep; a pure path-glob query (file enumeration)
 	// does not — it only walks.
 	if len(a.Where) > 0 && !ws.Grep.Enabled {
@@ -458,21 +481,9 @@ func (s *Server) treeSearch(args json.RawMessage) (any, ToolEvent, error) {
 
 // --- git_status ---
 
-type gitStatusArgs struct {
-	Workspace string `json:"workspace"`
-}
-
-func (s *Server) gitStatus(args json.RawMessage) (any, ToolEvent, error) {
-	var a gitStatusArgs
+func (s *Server) gitStatus(_ json.RawMessage) (any, ToolEvent, error) {
 	ev := ToolEvent{}
-	if err := unmarshalArgs(args, &a); err != nil {
-		return nil, ev, err
-	}
-	ev.Workspace = a.Workspace
-	ws, te := s.resolveWS(a.Workspace)
-	if te != nil {
-		return nil, ev, te
-	}
+	ws := s.ws
 	if !ws.IsGitRepo {
 		return nil, ev, newToolError("NOT_A_GIT_REPO", "workspace is not a git repository")
 	}

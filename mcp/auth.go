@@ -20,9 +20,10 @@ import (
 // static token matches. On failure it returns 401 with no hint as to what failed.
 // Tokens are never logged.
 type Bearer struct {
-	expected [][32]byte
-	extra    func(string) bool
-	log      *Logger
+	expected         [][32]byte
+	extra            func(string) bool
+	log              *Logger
+	resourceMetadata bool // emit a WWW-Authenticate resource_metadata hint on 401
 }
 
 // NewBearer builds a Bearer processor accepting any of the given tokens. With an
@@ -39,6 +40,15 @@ func NewBearer(tokens []string, log *Logger) *Bearer {
 // is consulted when no static token matches.
 func (b *Bearer) WithExtra(fn func(string) bool) *Bearer {
 	b.extra = fn
+	return b
+}
+
+// WithResourceMetadata makes a 401 carry a WWW-Authenticate header pointing at
+// this endpoint's protected-resource metadata (RFC 9728 / MCP 2025-11-25), the
+// standard OAuth-discovery trigger. Enable it only when an OAuth authorization
+// server is configured (otherwise the advertised metadata URL would 404).
+func (b *Bearer) WithResourceMetadata() *Bearer {
+	b.resourceMetadata = true
 	return b
 }
 
@@ -62,6 +72,13 @@ func (b *Bearer) Process(w http.ResponseWriter, r *http.Request, next func(http.
 		b.log.Auth(ok, r.RemoteAddr)
 	}
 	if !ok {
+		if b.resourceMetadata {
+			// RFC 9728: the protected-resource metadata URL for a resource at path
+			// /mcp/<name> is /.well-known/oauth-protected-resource/mcp/<name>. The
+			// request path already carries that suffix, so reuse it directly.
+			md := "https://" + r.Host + "/.well-known/oauth-protected-resource" + r.URL.Path
+			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+md+`"`)
+		}
 		return nil, endpoint.Error(http.StatusUnauthorized, "unauthorized", nil)
 	}
 	return next(w, r)

@@ -52,7 +52,7 @@ func TestInitializeSendsInstructions(t *testing.T) {
 		t.Fatal("expected non-empty instructions in initialize result")
 	}
 	// Orient-first guidance and the read-only constraint must be present.
-	for _, want := range []string{"workspace_list", "read-only"} {
+	for _, want := range []string{"tree_search", "read-only"} {
 		if !strings.Contains(res.Instructions, want) {
 			t.Errorf("instructions missing %q", want)
 		}
@@ -92,7 +92,7 @@ func TestToolsListInvariant(t *testing.T) {
 	}
 
 	want := map[string]bool{
-		"workspace_list": true, "file_read": true,
+		"workspace_info": true, "file_read": true,
 		"tree_search": true, "git_status": true,
 	}
 	got := map[string]bool{}
@@ -107,6 +107,12 @@ func TestToolsListInvariant(t *testing.T) {
 		}
 		if tool.Annotations["openWorldHint"] != false {
 			t.Errorf("tool %q missing openWorldHint=false: %+v", tool.Name, tool.Annotations)
+		}
+		// Workspace selection is by route now (§17): no tool takes a `workspace` arg.
+		if props, ok := tool.InputSchema["properties"].(map[string]any); ok {
+			if _, has := props["workspace"]; has {
+				t.Errorf("tool %q still exposes a workspace param: %+v", tool.Name, props)
+			}
 		}
 		// No mutating/shell surface may ever appear.
 		for _, banned := range []string{"write", "create", "delete", "move", "rename", "exec", "shell", "patch", "command"} {

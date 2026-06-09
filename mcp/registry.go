@@ -88,7 +88,7 @@ var orientationStems = []string{
 	"readme", "index", "_index", "contents", "toc", "overview", "about", "agents", "claude",
 }
 
-// maxWellKnownFiles caps the reported list so a noisy root can't flood workspace_list.
+// maxWellKnownFiles caps the reported list so a noisy root can't flood workspace_info.
 const maxWellKnownFiles = 5
 
 // detectOrientation scans the tree root once and returns the orientation files

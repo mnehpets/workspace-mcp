@@ -73,10 +73,48 @@ func TestResolveBearerTokensBothSetIsError(t *testing.T) {
 	}
 }
 
-func TestResolveBearerTokensNoneSetIsError(t *testing.T) {
+// With neither a static token nor OAuth configured, resolution itself is NOT an
+// error — an OAuth-only deployment is legitimate, so tokenRefs returns nothing.
+// The "some auth must exist" guarantee moved to Validate (see below).
+func TestResolveBearerTokensNoneIsEmptyNotError(t *testing.T) {
 	c := &mcp.Config{}
-	if _, err := c.ResolveBearerTokens(map[string]string{}); err == nil {
-		t.Fatal("expected error when no bearer token is configured")
+	got, err := c.ResolveBearerTokens(map[string]string{})
+	if err != nil {
+		t.Fatalf("resolving with no tokens configured should not error, got %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected no tokens, got %v", got)
+	}
+}
+
+// Validate (HTTP mode) is where missing auth is caught: no bearer tokens AND no
+// OAuth is rejected, but either alone satisfies it; stdio mode never requires it.
+func TestValidateRequiresSomeAuth(t *testing.T) {
+	base := func() *mcp.Config {
+		return &mcp.Config{
+			Server:     mcp.ServerConfig{Host: "127.0.0.1", Port: 3850},
+			Workspaces: []mcp.WorkspaceConfig{{Name: "default", Root: t.TempDir(), Read: mcp.ReadConfig{MaxBytes: 1000}}},
+		}
+	}
+	const validTok = "0123456789abcdef0123456789abcdef" // 32 bytes
+
+	// HTTP mode, neither bearer nor OAuth → error.
+	if err := base().Validate(nil, true); err == nil {
+		t.Fatal("expected error when neither bearer nor oauth is configured")
+	}
+	// A valid bearer token alone satisfies auth.
+	if err := base().Validate([]string{validTok}, true); err != nil {
+		t.Fatalf("a valid bearer token should satisfy auth: %v", err)
+	}
+	// OAuth alone satisfies auth (no static token needed).
+	c := base()
+	c.Auth.OAuth = mcp.OAuthConfig{ClientID: "cid", ClientSecret: mcp.SecretRef{Env: "X"}}
+	if err := c.Validate(nil, true); err != nil {
+		t.Fatalf("oauth alone should satisfy auth: %v", err)
+	}
+	// stdio mode (requireBearer=false) never requires auth.
+	if err := base().Validate(nil, false); err != nil {
+		t.Fatalf("stdio mode should not require auth: %v", err)
 	}
 }
 

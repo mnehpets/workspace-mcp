@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
+	"text/template"
 
 	"github.com/mnehpets/http/jsonrpc"
 	"github.com/mnehpets/workspace-mcp/gitaware"
@@ -21,15 +23,18 @@ const serverVersion = "0.1.0"
 // supportedProtocols lists MCP protocol versions we understand, newest first.
 var supportedProtocols = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
 
-// Server holds shared state for the MCP handlers.
+// Server holds shared state for the MCP handlers. Each Server is bound to a
+// single workspace: workspace selection happens at the HTTP routing layer (one
+// endpoint per workspace, §17), so the tools take no `workspace` argument and the
+// instructions are workspace-specific.
 type Server struct {
-	reg *Registry
+	ws  *Workspace
 	log *Logger
 }
 
-// NewServer builds a Server.
-func NewServer(reg *Registry, log *Logger) *Server {
-	return &Server{reg: reg, log: log}
+// NewServer builds a Server bound to one workspace.
+func NewServer(ws *Workspace, log *Logger) *Server {
+	return &Server{ws: ws, log: log}
 }
 
 // Register wires the MCP methods onto a jsonrpc endpoint.
@@ -60,21 +65,53 @@ type serverInfo struct {
 	Version string `json:"version"`
 }
 
-// serverInstructions is the MCP `instructions` string, delivered once at
-// initialize (before any tool reasoning). It is best-effort: the spec lets
-// servers send it, but general-purpose hosts may ignore it — so the tool
-// descriptions and workspace_list ("start here") must stand on their own too.
-// Keep it short: identity, the orient-first flow, and the hard constraints.
-const serverInstructions = `This server is a read-only window into one or more local directory trees ("workspaces") — notes, docs, papers, code, data on the user's machine. It hands you raw bytes plus cheap orientation; YOU do the analysis. It is not a coding agent and cannot run commands or write anything.
+// instructionsData is the render context for instructionsTemplate.
+type instructionsData struct {
+	Description    string // this workspace's description (may be empty)
+	WellKnownFiles string // orientation files, comma-joined (empty when none)
+	IsGitRepo      bool
+}
 
+// instructionsTemplate renders the MCP `instructions` string for one workspace.
+// The URL already picked the tree (§17), so the text is workspace-specific: it
+// folds in the workspace's description and detected orientation files, then the
+// orient-first flow and the hard constraints. Trim markers ({{- / -}}) keep the
+// conditional blocks from leaving stray blank lines.
+var instructionsTemplate = template.Must(template.New("instructions").Parse(
+	`This server is a read-only window into a single local directory tree (a "workspace") on the user's machine — notes, docs, papers, code, or data. It hands you raw bytes plus cheap orientation; YOU do the analysis. It is not a coding agent and cannot run commands or write anything.
+{{if .Description}}
+This workspace: {{.Description}}
+{{end}}
 How to use it:
-1. Call workspace_list first to discover the available workspaces (the "workspace" argument on every other tool defaults to "default").
-2. Orient before diving: read a workspace's README.md (and AGENTS.md/CLAUDE.md if present) with file_read to learn what it contains, and use tree_search to see what files exist.
-3. Locate and browse: tree_search finds files by path and/or content. Omit "path" (or pass "**/*") to see the ENTIRE tree at once; use a glob like "docs/**/*.md" to narrow by name/location ("**" crosses directories, a single "*" does not — "*" is root-level only). Add "where" (content predicates) to find where a term appears. Omit "where" to just list matching files with their sizes (this is also how you explore directory structure) — and pass "includeMetadata": true on that listing to get each file's frontmatter (title/tags/summary) so you can pick the right files in one pass instead of guessing from filenames. Narrow "path" to avoid truncation.
-4. Read: file_read returns a file's contents; large files truncate at a byte cap (raise "maxBytes" up to the workspace limit).
-5. git_status gives branch + per-file change codes on git-repo workspaces.
+{{if .WellKnownFiles -}}
+1. Getting oriented (if the question needs it): this tree has {{.WellKnownFiles}} at its root worth reading with file_read, and tree_search surveys what else exists.
+{{- else -}}
+1. Getting oriented (if the question needs it): tree_search surveys what files exist — try "includeMetadata": true to read their titles/tags in one pass.
+{{- end}}
+2. Locate and browse: tree_search finds files by path and/or content. Omit "path" (or pass "**/*") to see the ENTIRE tree at once; use a glob like "docs/**/*.md" to narrow by name/location ("**" crosses directories, a single "*" does not — "*" is root-level only). Add "where" (content predicates) to find where a term appears. Omit "where" to just list matching files with their sizes (this is also how you explore directory structure) — and pass "includeMetadata": true on that listing to get each file's frontmatter (title/tags/summary) so you can pick the right files in one pass instead of guessing from filenames. Narrow "path" to avoid truncation.
+3. Read: file_read returns a file's contents; large files truncate at a byte cap (raise "maxBytes" up to the workspace limit).
+{{if .IsGitRepo -}}
+4. git_status gives the current branch + per-file change codes (this workspace is a git repository).
+{{end}}
+Constraints: read-only (no writes, shell, or git mutation exist). Access is default-deny — some paths are intentionally invisible, so a NOT_FOUND or POLICY_DENIED is an expected answer, not a transient error to retry. All paths are workspace-relative; absolute paths and ".." are rejected.`))
 
-Constraints: read-only (no writes, shell, or git mutation exist). Access is default-deny — some paths are intentionally invisible, so a NOT_FOUND or POLICY_DENIED is an expected answer, not a transient error to retry. All paths are workspace-relative; absolute paths and ".." are rejected.`
+// workspaceInstructions renders the `instructions` string for one workspace. It
+// is best-effort: the spec lets servers send it, but general-purpose hosts may
+// ignore it — so the tool descriptions and the workspace_info ("start here") tool
+// must stand on their own too.
+func workspaceInstructions(ws *Workspace) string {
+	var b strings.Builder
+	if err := instructionsTemplate.Execute(&b, instructionsData{
+		Description:    ws.Description,
+		WellKnownFiles: strings.Join(ws.WellKnownFiles, ", "),
+		IsGitRepo:      ws.IsGitRepo,
+	}); err != nil {
+		// The template is a compile-time constant with trivial fields; an execution
+		// error is impossible in practice. Degrade to empty rather than panic.
+		return ""
+	}
+	return b.String()
+}
 
 // Initialize negotiates a protocol version and advertises the tools capability.
 func (s *Server) Initialize(_ context.Context, p InitializeParams) (InitializeResult, error) {
@@ -82,7 +119,7 @@ func (s *Server) Initialize(_ context.Context, p InitializeParams) (InitializeRe
 		ProtocolVersion: negotiateProtocol(p.ProtocolVersion),
 		Capabilities:    map[string]any{"tools": map[string]any{}},
 		ServerInfo:      serverInfo{Name: serverName, Version: serverVersion},
-		Instructions:    serverInstructions,
+		Instructions:    workspaceInstructions(s.ws),
 	}, nil
 }
 
@@ -174,6 +211,7 @@ func (s *Server) ToolsCall(_ context.Context, p ToolsCallParams) (ToolResult, er
 	result, ev, err := h(s, p.Arguments)
 	ev.Method = "tools/call"
 	ev.Tool = p.Name
+	ev.Workspace = s.ws.Name
 	if err != nil {
 		te := asToolError(err)
 		ev.Allowed = false
@@ -193,7 +231,7 @@ func (s *Server) ToolsCall(_ context.Context, p ToolsCallParams) (ToolResult, er
 
 // toolHandlers maps tool name to handler (method expressions).
 var toolHandlers = map[string]toolFunc{
-	"workspace_list": (*Server).workspaceList,
+	"workspace_info": (*Server).workspaceInfo,
 	"file_read":      (*Server).fileRead,
 	"tree_search":    (*Server).treeSearch,
 	"git_status":     (*Server).gitStatus,
@@ -239,14 +277,6 @@ func mapPathError(err error) *toolError {
 		// containment denial; do not leak the underlying message.
 		return &toolError{Code: "POLICY_DENIED", Message: "path denied", Reason: "outside_root"}
 	}
-}
-
-// mapWorkspaceError maps a registry lookup failure.
-func mapWorkspaceError(err error) *toolError {
-	if errors.Is(err, ErrUnknownWorkspace) {
-		return &toolError{Code: "UNKNOWN_WORKSPACE", Message: "unknown workspace"}
-	}
-	return asToolError(err)
 }
 
 // mapPolicyDenied builds a POLICY_DENIED error for a policy decision reason.

@@ -120,28 +120,23 @@ func TestIntegrationReadFlow(t *testing.T) {
 		t.Fatalf("tools/list: %+v", rr.Error)
 	}
 
-	// workspace_list.
-	var wl struct {
-		Workspaces []struct {
-			Name      string `json:"name"`
-			IsGitRepo bool   `json:"isGitRepo"`
-		} `json:"workspaces"`
+	// workspace_info on the default (git) endpoint describes just this workspace.
+	var wi struct {
+		Name      string `json:"name"`
+		IsGitRepo bool   `json:"isGitRepo"`
 	}
-	f.callTool(t, "workspace_list", map[string]any{}, &wl)
-	if len(wl.Workspaces) != 2 {
-		t.Fatalf("expected 2 workspaces, got %+v", wl.Workspaces)
+	f.callTool(t, "workspace_info", map[string]any{}, &wi)
+	if wi.Name != "default" || !wi.IsGitRepo {
+		t.Fatalf("default workspace_info wrong: %+v", wi)
 	}
-	gitFound := false
-	for _, w := range wl.Workspaces {
-		if w.Name == "default" && w.IsGitRepo {
-			gitFound = true
-		}
-		if w.Name == "notes" && w.IsGitRepo {
-			t.Error("notes should not be a git repo")
-		}
+	// The notes endpoint describes a non-git workspace.
+	var wiNotes struct {
+		Name      string `json:"name"`
+		IsGitRepo bool   `json:"isGitRepo"`
 	}
-	if !gitFound {
-		t.Error("default should be a git repo")
+	f.callToolWS(t, "notes", "workspace_info", map[string]any{}, &wiNotes)
+	if wiNotes.Name != "notes" || wiNotes.IsGitRepo {
+		t.Errorf("notes workspace_info wrong: %+v", wiNotes)
 	}
 
 	// tree_search enumeration (no `where`): README.md visible with a size;
@@ -227,9 +222,8 @@ func TestIntegrationReadFlow(t *testing.T) {
 	}
 
 	// tree_search with a where predicate, grep disabled on notes -> GREP_DISABLED.
-	assertToolError(t, f.callTool(t, "tree_search", map[string]any{
-		"workspace": "notes",
-		"where":     []map[string]any{{"text": "milk"}},
+	assertToolError(t, f.callToolWS(t, "notes", "tree_search", map[string]any{
+		"where": []map[string]any{{"text": "milk"}},
 	}, nil), "GREP_DISABLED")
 
 	// tree_search enumeration with includeMetadata (no `where`) does NOT require
@@ -237,8 +231,7 @@ func TestIntegrationReadFlow(t *testing.T) {
 	var enMeta struct {
 		Files []searchFile `json:"files"`
 	}
-	f.callTool(t, "tree_search", map[string]any{
-		"workspace":       "notes",
+	f.callToolWS(t, "notes", "tree_search", map[string]any{
 		"includeMetadata": true,
 	}, &enMeta)
 	var sawTodo bool
@@ -293,10 +286,13 @@ func TestIntegrationReadFlow(t *testing.T) {
 	}
 
 	// git_status on non-git workspace -> NOT_A_GIT_REPO.
-	assertToolError(t, f.callTool(t, "git_status", map[string]any{"workspace": "notes"}, nil), "NOT_A_GIT_REPO")
+	assertToolError(t, f.callToolWS(t, "notes", "git_status", map[string]any{}, nil), "NOT_A_GIT_REPO")
 
-	// Unknown workspace -> UNKNOWN_WORKSPACE.
-	assertToolError(t, f.callTool(t, "file_read", map[string]any{"workspace": "ghost", "path": "x.md"}, nil), "UNKNOWN_WORKSPACE")
+	// Unknown workspace is now a routing miss (404), not a domain error: there is
+	// no /mcp/ghost endpoint registered.
+	if code := f.statusFor(t, f.wsURL("ghost")); code != http.StatusNotFound {
+		t.Fatalf("unknown workspace route should 404, got %d", code)
+	}
 
 	// Audit log recorded tool calls.
 	if !strings.Contains(f.logs.String(), "tool_call") {

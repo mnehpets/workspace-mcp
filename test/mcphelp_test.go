@@ -8,9 +8,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/mnehpets/http/endpoint"
-	"github.com/mnehpets/http/jsonrpc"
-
 	"github.com/mnehpets/workspace-mcp/mcp"
 )
 
@@ -34,9 +31,13 @@ type toolResult struct {
 	IsError bool `json:"isError"`
 }
 
-// mcpFixture is a running test server plus the bearer token to reach it.
+// mcpFixture is a running test server plus the bearer token to reach it. With
+// workspace-per-URL (§17) the server mounts one MCP endpoint per workspace at
+// /mcp/<name>; `url` targets the "default" workspace, and wsURL/callToolWS reach
+// a named one.
 type mcpFixture struct {
-	url   string
+	base  string // scheme://host
+	url   string // base + /mcp/default
 	token string
 	logs  *bytes.Buffer
 }
@@ -46,30 +47,50 @@ func newMCPFixture(t *testing.T, reg *mcp.Registry) *mcpFixture {
 	const token = "0123456789abcdef0123456789abcdef"
 	logs := &bytes.Buffer{}
 	log := mcp.NewLogger("info", logs)
-	server := mcp.NewServer(reg, log)
-	rpc := jsonrpc.NewEndpoint()
-	server.Register(rpc)
-	bearer := mcp.NewBearer([]string{token}, log)
-
-	mux := http.NewServeMux()
-	mux.Handle("POST /mcp", endpoint.Handler(rpc.Endpoint, bearer))
-	ts := httptest.NewServer(mux)
+	handler := mcp.BuildHandler(reg, log, []string{token}, nil)
+	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
-	return &mcpFixture{url: ts.URL + "/mcp", token: token, logs: logs}
+	return &mcpFixture{base: ts.URL, url: ts.URL + "/mcp/default", token: token, logs: logs}
 }
 
-// call sends a JSON-RPC request with the fixture's valid token.
+// wsURL is the MCP endpoint for a named workspace.
+func (f *mcpFixture) wsURL(name string) string { return f.base + "/mcp/" + name }
+
+// statusFor POSTs an authenticated tools/list to url and returns the HTTP status
+// code (used to assert routing-level outcomes like a 404 for an unknown
+// workspace segment).
+func (f *mcpFixture) statusFor(t *testing.T, url string) int {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": map[string]any{}})
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+f.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
+}
+
+// call sends a JSON-RPC request to the default workspace with a valid token.
 func (f *mcpFixture) call(t *testing.T, method string, params any) rpcResponse {
 	t.Helper()
-	return f.callWithToken(t, f.token, method, params)
+	return f.callURL(t, f.url, f.token, method, params)
 }
 
 func (f *mcpFixture) callWithToken(t *testing.T, token, method string, params any) rpcResponse {
 	t.Helper()
+	return f.callURL(t, f.url, token, method, params)
+}
+
+func (f *mcpFixture) callURL(t *testing.T, url, token, method string, params any) rpcResponse {
+	t.Helper()
 	body, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": method, "params": params,
 	})
-	req, _ := http.NewRequest("POST", f.url, bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -90,11 +111,18 @@ func (f *mcpFixture) callWithToken(t *testing.T, token, method string, params an
 	return rr
 }
 
-// callTool invokes tools/call and returns the parsed ToolResult plus the
-// decoded domain payload (content[0].text as JSON into out, if non-nil).
+// callTool invokes tools/call against the default workspace.
 func (f *mcpFixture) callTool(t *testing.T, name string, args map[string]any, out any) toolResult {
 	t.Helper()
-	rr := f.call(t, "tools/call", map[string]any{"name": name, "arguments": args})
+	return f.callToolWS(t, "default", name, args, out)
+}
+
+// callToolWS invokes tools/call against a named workspace's endpoint and returns
+// the parsed ToolResult plus the decoded domain payload (content[0].text as JSON
+// into out, if non-nil).
+func (f *mcpFixture) callToolWS(t *testing.T, ws, name string, args map[string]any, out any) toolResult {
+	t.Helper()
+	rr := f.callURL(t, f.wsURL(ws), f.token, "tools/call", map[string]any{"name": name, "arguments": args})
 	if rr.Error != nil {
 		t.Fatalf("tools/call %s returned JSON-RPC error: %+v", name, rr.Error)
 	}

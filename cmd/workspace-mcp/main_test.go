@@ -30,7 +30,11 @@ func TestStdioLoop(t *testing.T) {
 	}
 	defer reg.Close()
 
-	server := mcp.NewServer(reg, mcp.NewLogger("error", &bytes.Buffer{}))
+	ws, err := selectStdioWorkspace(reg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := mcp.NewServer(ws, mcp.NewLogger("error", &bytes.Buffer{}))
 	rpc := jsonrpc.NewEndpoint()
 	server.Register(rpc)
 	handler := endpoint.Handler(rpc.Endpoint)
@@ -77,5 +81,41 @@ func TestStdioLoop(t *testing.T) {
 	}
 	if callResp.ID != 2 || !strings.Contains(callResp.Result.Content[0].Text, "# Hi") {
 		t.Fatalf("unexpected tool response: %s", lines[1])
+	}
+}
+
+// Stdio has no URL to carry the workspace (§17), so selection is explicit: a
+// single workspace is picked implicitly, multiple require -workspace by name.
+func TestSelectStdioWorkspace(t *testing.T) {
+	dir1, dir2 := t.TempDir(), t.TempDir()
+	mk := func(specs ...mcp.WorkspaceConfig) *mcp.Registry {
+		reg, err := mcp.Build(&mcp.Config{Workspaces: specs})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(reg.Close)
+		return reg
+	}
+	one := mk(mcp.WorkspaceConfig{Name: "solo", Root: dir1, Policy: mcp.PolicyConfig{AllowGlobs: []string{"**/*"}}, Read: mcp.ReadConfig{MaxBytes: 1000}})
+	two := mk(
+		mcp.WorkspaceConfig{Name: "a", Root: dir1, Policy: mcp.PolicyConfig{AllowGlobs: []string{"**/*"}}, Read: mcp.ReadConfig{MaxBytes: 1000}},
+		mcp.WorkspaceConfig{Name: "b", Root: dir2, Policy: mcp.PolicyConfig{AllowGlobs: []string{"**/*"}}, Read: mcp.ReadConfig{MaxBytes: 1000}},
+	)
+
+	// One workspace, no flag → that one.
+	if ws, err := selectStdioWorkspace(one, ""); err != nil || ws.Name != "solo" {
+		t.Fatalf("single workspace should be picked implicitly: ws=%v err=%v", ws, err)
+	}
+	// Multiple, no flag → error.
+	if _, err := selectStdioWorkspace(two, ""); err == nil {
+		t.Fatal("multiple workspaces with no -workspace should error")
+	}
+	// Multiple, named flag → that one.
+	if ws, err := selectStdioWorkspace(two, "b"); err != nil || ws.Name != "b" {
+		t.Fatalf("-workspace b should select b: ws=%v err=%v", ws, err)
+	}
+	// Unknown name → error.
+	if _, err := selectStdioWorkspace(two, "nope"); err == nil {
+		t.Fatal("-workspace with unknown name should error")
 	}
 }

@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"time"
 
 	"github.com/mnehpets/http/endpoint"
 	"github.com/mnehpets/http/jsonrpc"
@@ -35,6 +34,7 @@ func run() error {
 	configPath := flag.String("config", "./config.yaml", "path to YAML config")
 	envPath := flag.String("env", "./secrets.env", "path to dotenv secrets file")
 	stdio := flag.Bool("stdio", false, "run as a local stdio MCP server (no HTTP, no bearer auth)")
+	workspace := flag.String("workspace", "", "in -stdio mode, the single workspace to serve (required when more than one is configured; HTTP mode serves all via per-route endpoints)")
 	flag.Parse()
 
 	cfg, err := mcp.LoadConfig(*configPath)
@@ -76,14 +76,16 @@ func run() error {
 	}
 	defer reg.Close()
 
-	server := mcp.NewServer(reg, log)
-
 	if *stdio {
-		log.Slog().Info("starting stdio", "workspaces", len(cfg.Workspaces))
-		return serveStdio(server, log)
+		ws, err := selectStdioWorkspace(reg, *workspace)
+		if err != nil {
+			return err
+		}
+		log.Slog().Info("starting stdio", "workspace", ws.Name)
+		return serveStdio(mcp.NewServer(ws, log), log)
 	}
 
-	handler := buildHandler(server, log, bearerTokens, oauthServer)
+	handler := mcp.BuildHandler(reg, log, bearerTokens, oauthServer)
 
 	if cfg.Server.Ngrok.Enabled {
 		return serveNgrok(context.Background(), cfg, env, handler, log)
@@ -119,32 +121,22 @@ func serveNgrok(ctx context.Context, cfg *mcp.Config, env map[string]string, han
 	return http.Serve(listener, handler)
 }
 
-// buildHandler wires the HTTP routes: an unauthenticated /healthz, plus
-// bearer-protected POST /mcp (JSON-RPC) and GET /mcp (SSE keepalive stream).
-// If oauthServer is non-nil, OAuth routes are registered and OAuth-issued
-// access tokens are accepted alongside static bearer tokens.
-func buildHandler(server *mcp.Server, log *mcp.Logger, bearerTokens []string, oauthServer *mcp.OAuthServer) http.Handler {
-	rpc := jsonrpc.NewEndpoint()
-	server.Register(rpc)
-
-	bearer := mcp.NewBearer(bearerTokens, log)
-	if oauthServer != nil {
-		bearer = bearer.WithExtra(oauthServer.CheckToken)
+// selectStdioWorkspace picks the single workspace to serve over stdio. Stdio has
+// no URL to carry the workspace (§17), so the choice is explicit: -workspace by
+// name, or — when exactly one workspace is configured — that one implicitly.
+func selectStdioWorkspace(reg *mcp.Registry, name string) (*mcp.Workspace, error) {
+	if name != "" {
+		ws, err := reg.Get(name)
+		if err != nil {
+			return nil, fmt.Errorf("-workspace %q: %w", name, err)
+		}
+		return ws, nil
 	}
-
-	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", endpoint.HandleFunc(func(_ http.ResponseWriter, _ *http.Request, _ struct{}) (endpoint.Renderer, error) {
-		return &endpoint.JSONRenderer{Value: "ok"}, nil
-	}, log))
-	if oauthServer != nil {
-		mux.Handle("GET /.well-known/oauth-authorization-server", endpoint.HandleFunc(oauthServer.WellKnownAuthServer, log))
-		mux.Handle("GET /.well-known/oauth-protected-resource", endpoint.HandleFunc(oauthServer.WellKnownProtectedResource, log))
-		mux.Handle("/oauth/authorize", endpoint.HandleFunc(oauthServer.Authorize, log))
-		mux.Handle("POST /oauth/token", endpoint.HandleFunc(oauthServer.Token, log))
+	list := reg.List()
+	if len(list) == 1 {
+		return list[0], nil
 	}
-	mux.Handle("POST /mcp", endpoint.Handler(rpc.Endpoint, bearer, log))
-	mux.Handle("GET /mcp", endpoint.Handler(sseStream, bearer, log))
-	return mux
+	return nil, fmt.Errorf("-stdio requires -workspace when multiple workspaces are configured (%d found)", len(list))
 }
 
 // serveStdio runs the MCP server over stdin/stdout using newline-delimited
@@ -196,30 +188,4 @@ func dispatchStdio(handler http.Handler, message []byte) []byte {
 	handler.ServeHTTP(rec, req)
 	// Notifications yield 204 / no body.
 	return bytes.TrimRight(rec.Body.Bytes(), "\n")
-}
-
-// sseStream is the Streamable-HTTP GET stream: the optional server→client
-// channel for server-initiated messages (progress, log notifications,
-// resources/updated, sampling/elicitation requests, etc.). We don't push any of
-// those yet, so for now it just holds the connection open with periodic
-// keepalives until the client disconnects. Kept in place so that when we do add
-// server-pushed messages to the LLM, the channel already exists — emit them by
-// yielding SSEvents here instead of empty keepalives.
-func sseStream(w http.ResponseWriter, r *http.Request, _ struct{}) (endpoint.Renderer, error) {
-	ctx := r.Context()
-	events := func(yield func(endpoint.SSEvent) bool) {
-		ticker := time.NewTicker(25 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if !yield(endpoint.SSEvent{Data: ""}) {
-					return
-				}
-			}
-		}
-	}
-	return &endpoint.SSERenderer{Events: events}, nil
 }

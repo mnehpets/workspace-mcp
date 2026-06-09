@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -135,11 +136,16 @@ func (s *OAuthServer) WellKnownAuthServer(_ http.ResponseWriter, r *http.Request
 }
 
 // WellKnownProtectedResource is an endpoint.EndpointFunc[struct{}] for
-// GET /.well-known/oauth-protected-resource (RFC 9728).
+// GET /.well-known/oauth-protected-resource[/<resource path>] (RFC 9728).
+// With one MCP endpoint per workspace (§17) the resource lives at /mcp/<name>,
+// so its metadata is requested at /.well-known/oauth-protected-resource/mcp/<name>.
+// We echo whatever suffix follows the well-known prefix as the resource path, and
+// name a single authorization server for every resource.
 func (s *OAuthServer) WellKnownProtectedResource(_ http.ResponseWriter, r *http.Request, _ struct{}) (endpoint.Renderer, error) {
 	base := "https://" + r.Host
+	resourcePath := strings.TrimPrefix(r.URL.Path, "/.well-known/oauth-protected-resource")
 	return &endpoint.JSONRenderer{Value: map[string]any{
-		"resource":              base + "/mcp",
+		"resource":              base + resourcePath,
 		"authorization_servers": []string{base},
 	}}, nil
 }
