@@ -17,14 +17,14 @@ server:
 
 auth:
   bearerToken:
-    env: SHIM_BEARER_TOKEN         # resolved from secrets.env / OS env, never stored here
+    env: MCP_BEARER_TOKEN         # resolved from secrets.env / OS env, never stored here
   # For zero-lockstep rotation, configure a list instead of the single
   # `bearerToken` above (set one or the other, not both). The server accepts a
   # request bearing ANY listed token: add the new one, switch claude.ai over at
   # your leisure, then drop the old one.
   # bearerTokens:
-  #   - env: SHIM_BEARER_TOKEN       # current
-  #   - env: SHIM_BEARER_TOKEN_NEXT  # next (during rotation)
+  #   - env: MCP_BEARER_TOKEN       # current
+  #   - env: MCP_BEARER_TOKEN_NEXT  # next (during rotation)
 
   # OAuth 2.0 authorization code flow — required for claude.ai connectors,
   # which only support OAuth. clientID is public (plain string); clientSecret

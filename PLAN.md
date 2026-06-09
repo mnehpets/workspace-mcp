@@ -201,7 +201,7 @@ server:
 
 auth:
   bearerToken:
-    env: SHIM_BEARER_TOKEN         # resolved from .env / OS env, never stored here
+    env: MCP_BEARER_TOKEN         # resolved from .env / OS env, never stored here
 
 # One or more named directory trees. The tool `workspace` param selects one and
 # defaults to "default". Permissions (policy/read/grep/gitignore) are per-workspace.
@@ -258,14 +258,14 @@ log:
 
 ```yaml
 bearerToken:
-  env: SHIM_BEARER_TOKEN     # name of an env var to read the value from
+  env: MCP_BEARER_TOKEN     # name of an env var to read the value from
 ```
 
 Resolution order at startup:
 1. Read a `.env` file (path via `-env`, default `./.env`) with
    `github.com/joho/godotenv` into a `map[string]string`.
 2. Overlay the process environment — `os.Environ()` **overrides** dotenv values
-   (so a deployment can inject `SHIM_BEARER_TOKEN` without a file).
+   (so a deployment can inject `MCP_BEARER_TOKEN` without a file).
 3. Resolve each `{ env: NAME }` reference against that merged map; a missing or
    empty referenced var is a startup error.
 
@@ -274,7 +274,7 @@ flagged in validation for `bearerToken` (keep tokens out of the YAML). `.env`:
 
 ```dotenv
 # .env  (gitignored — never commit)
-SHIM_BEARER_TOKEN=replace-with-long-random-token   # >= 32 random bytes
+MCP_BEARER_TOKEN=replace-with-long-random-token   # >= 32 random bytes
 ```
 
 Validation: at least one workspace; names unique; a workspace named `default`

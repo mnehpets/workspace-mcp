@@ -221,7 +221,7 @@ with its own policy globs, read/grep limits. Parsed into a typed struct with
 ```yaml
 auth:
   bearerToken:
-    env: SHIM_BEARER_TOKEN     # name of an env var to read the value from
+    env: MCP_BEARER_TOKEN     # name of an env var to read the value from
 ```
 
 Resolution order ([mcp/secrets.go]): read the `secrets.env` file (`-env`, default
@@ -247,7 +247,7 @@ server:
     authtoken: { env: NGROK_AUTHTOKEN }
     domain: my-host.ngrok.app     # optional: pin a stable domain
 auth:
-  bearerToken: { env: SHIM_BEARER_TOKEN }
+  bearerToken: { env: MCP_BEARER_TOKEN }
   oauth:                          # OAuth 2.0 authorization code flow (required by claude.ai)
     clientID: workspace-mcp       # public; stored directly in config
     clientSecret: { env: OAUTH_CLIENT_SECRET }

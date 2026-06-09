@@ -51,7 +51,7 @@ Requires Go 1.26+ (the `go.mod` toolchain); the `os.Root` sandbox itself needs 1
 3. Put the bearer token in `secrets.env` (never in `config.yaml`). Generate a strong one:
 
    ```sh
-   echo "SHIM_BEARER_TOKEN=$(openssl rand -hex 32)" > secrets.env
+   echo "MCP_BEARER_TOKEN=$(openssl rand -hex 32)" > secrets.env
    ```
 
    The config references it by name:
@@ -59,11 +59,11 @@ Requires Go 1.26+ (the `go.mod` toolchain); the `os.Root` sandbox itself needs 1
    ```yaml
    auth:
      bearerToken:
-       env: SHIM_BEARER_TOKEN
+       env: MCP_BEARER_TOKEN
    ```
 
    Secrets resolve from the `secrets.env` file overlaid by the OS environment (the OS
-   environment **wins**), so a deployment can inject `SHIM_BEARER_TOKEN` without a
+   environment **wins**), so a deployment can inject `MCP_BEARER_TOKEN` without a
    file. A missing/empty referenced variable is a startup error.
 
    **Rotation:** to roll the token without a lockstep cutover, list multiple tokens
@@ -73,8 +73,8 @@ Requires Go 1.26+ (the `go.mod` toolchain); the `os.Root` sandbox itself needs 1
    ```yaml
    auth:
      bearerTokens:
-       - env: SHIM_BEARER_TOKEN        # current
-       - env: SHIM_BEARER_TOKEN_NEXT   # next — switch claude.ai over, then drop this
+       - env: MCP_BEARER_TOKEN        # current
+       - env: MCP_BEARER_TOKEN_NEXT   # next — switch claude.ai over, then drop this
    ```
 
 `config.yaml` and `secrets.env` are gitignored. Only the `*.example.*` files are committed.
