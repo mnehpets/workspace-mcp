@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "workspace-mcp": {
+      "type": "stdio",
+      "command": "/src/workspace-mcp/workspace-mcp",
+      "args": [
+        "-stdio",
+        "-config",
+        "/src/workspace-mcp/example/config.example.yaml"
+      ]
+    }
+  }
+}

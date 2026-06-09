@@ -14,15 +14,12 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# Environment files
-.env
-.env.*
-!.env.example
+# Secrets file
+secrets.env
 
 # Local config (secrets-free, but host-specific; never commit)
 config.yaml
 config.local.yaml
-!config.example.yaml
 ngrok.yml
 !ngrok.example.yml
 

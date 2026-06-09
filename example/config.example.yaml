@@ -1,14 +1,23 @@
 # config.example.yaml — copy to config.yaml (gitignored) and edit.
-# Secrets never go here; see .env.example.
+# Secrets never go here; see secrets.example.env.
 
 server:
-  host: 127.0.0.1                 # localhost only; ngrok fronts it
+  # Plain TCP listener — used when ngrok.enabled is false.
+  host: 127.0.0.1
   port: 3850
-  publicURL: https://<reserved-subdomain>.ngrok.app
+
+  # Built-in ngrok tunnel. When enabled, the server dials ngrok directly —
+  # no external `ngrok` process or ngrok.yml needed. host/port are ignored.
+  # The public URL is logged at startup.
+  # ngrok:
+  #   enabled: true
+  #   authtoken:
+  #     env: NGROK_AUTHTOKEN        # resolved from secrets.env / OS env
+  #   domain: my-reserved-host.ngrok.app   # optional: pin a reserved domain
 
 auth:
   bearerToken:
-    env: SHIM_BEARER_TOKEN         # resolved from .env / OS env, never stored here
+    env: SHIM_BEARER_TOKEN         # resolved from secrets.env / OS env, never stored here
   # For zero-lockstep rotation, configure a list instead of the single
   # `bearerToken` above (set one or the other, not both). The server accepts a
   # request bearing ANY listed token: add the new one, switch claude.ai over at
@@ -16,6 +25,16 @@ auth:
   # bearerTokens:
   #   - env: SHIM_BEARER_TOKEN       # current
   #   - env: SHIM_BEARER_TOKEN_NEXT  # next (during rotation)
+
+  # OAuth 2.0 authorization code flow — required for claude.ai connectors,
+  # which only support OAuth. clientID is public (plain string); clientSecret
+  # is a secret reference. Access tokens are dynamically issued per session
+  # (self-contained AEAD; no server-side store). bearerToken/bearerTokens and
+  # oauth may both be configured; the server accepts any valid credential.
+  # oauth:
+  #   clientID: workspace-mcp
+  #   clientSecret:
+  #     env: OAUTH_CLIENT_SECRET
 
 # One or more named directory trees. The tool `workspace` param selects one and
 # defaults to "default". Permissions (policy/read/grep/gitignore) are per-workspace.
