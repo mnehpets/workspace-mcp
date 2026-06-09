@@ -104,7 +104,7 @@ func (a AuthConfig) tokenRefs() ([]SecretRef, error) {
 	case single:
 		return []SecretRef{a.BearerToken}, nil
 	default:
-		return nil, fmt.Errorf("no bearer token configured (set auth.bearerToken or auth.bearerTokens)")
+		return nil, nil // no static tokens; Validate checks auth.oauth covers the gap
 	}
 }
 

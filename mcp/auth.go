@@ -16,21 +16,30 @@ import (
 // valid during an overlap window, enabling zero-lockstep rotation. Each presented
 // token is compared (as a SHA-256 digest) against every expected one in constant
 // time, so neither token content/length nor which token matched leaks via timing.
-// On failure it returns a 401 with no hint as to whether the token was missing or
-// wrong. Tokens are never logged.
+// An optional extra validator (e.g. an OAuth token checker) is consulted when no
+// static token matches. On failure it returns 401 with no hint as to what failed.
+// Tokens are never logged.
 type Bearer struct {
 	expected [][32]byte
+	extra    func(string) bool
 	log      *Logger
 }
 
 // NewBearer builds a Bearer processor accepting any of the given tokens. With an
-// empty slice every request is rejected (no token can match).
+// empty slice every request is rejected unless an extra validator is set.
 func NewBearer(tokens []string, log *Logger) *Bearer {
 	exp := make([][32]byte, len(tokens))
 	for i, t := range tokens {
 		exp[i] = sha256.Sum256([]byte(t))
 	}
 	return &Bearer{expected: exp, log: log}
+}
+
+// WithExtra adds a dynamic token validator (e.g. OAuth access token check) that
+// is consulted when no static token matches.
+func (b *Bearer) WithExtra(fn func(string) bool) *Bearer {
+	b.extra = fn
+	return b
 }
 
 // Process implements endpoint.Processor.
@@ -42,6 +51,11 @@ func (b *Bearer) Process(w http.ResponseWriter, r *http.Request, next func(http.
 	match := 0
 	for i := range b.expected {
 		match |= subtle.ConstantTimeCompare(got[:], b.expected[i][:])
+	}
+	if match == 0 && b.extra != nil && token != "" {
+		if b.extra(token) {
+			match = 1
+		}
 	}
 	ok := token != "" && match == 1
 	if b.log != nil {

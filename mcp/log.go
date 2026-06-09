@@ -6,7 +6,11 @@ package mcp
 import (
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
+	"time"
+
+	"github.com/mnehpets/http/endpoint"
 )
 
 // Logger wraps slog with audit-specific helpers.
@@ -67,4 +71,38 @@ func (a *Logger) ToolCall(e ToolEvent) {
 // Auth records an authentication outcome. The token is never an argument here.
 func (a *Logger) Auth(allowed bool, remote string) {
 	a.slog.Info("auth", "allowed", allowed, "remote", remote)
+}
+
+// Process implements endpoint.Processor, logging each request's method, path,
+// status code, and elapsed duration.
+func (l *Logger) Process(w http.ResponseWriter, r *http.Request,
+	next func(http.ResponseWriter, *http.Request) (endpoint.Renderer, error),
+) (endpoint.Renderer, error) {
+	start := time.Now()
+	method, path := r.Method, r.URL.Path
+	rend, err := next(w, r)
+	if err != nil {
+		l.slog.Info("request", "method", method, "path", path,
+			"status", http.StatusInternalServerError,
+			"duration", time.Since(start).Round(time.Millisecond).String())
+		return rend, err
+	}
+	return endpoint.RendererFunc(func(w http.ResponseWriter, r *http.Request) error {
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		rerr := rend.Render(rec, r)
+		l.slog.Info("request", "method", method, "path", path,
+			"status", rec.status,
+			"duration", time.Since(start).Round(time.Millisecond).String())
+		return rerr
+	}), nil
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
 }

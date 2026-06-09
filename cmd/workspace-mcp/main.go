@@ -7,7 +7,7 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -18,6 +18,8 @@ import (
 
 	"github.com/mnehpets/http/endpoint"
 	"github.com/mnehpets/http/jsonrpc"
+	"golang.ngrok.com/ngrok"
+	ngrokconfig "golang.ngrok.com/ngrok/config"
 
 	"github.com/mnehpets/workspace-mcp/mcp"
 )
@@ -31,7 +33,7 @@ func main() {
 
 func run() error {
 	configPath := flag.String("config", "./config.yaml", "path to YAML config")
-	envPath := flag.String("env", "./.env", "path to dotenv secrets file")
+	envPath := flag.String("env", "./secrets.env", "path to dotenv secrets file")
 	stdio := flag.Bool("stdio", false, "run as a local stdio MCP server (no HTTP, no bearer auth)")
 	flag.Parse()
 
@@ -47,10 +49,18 @@ func run() error {
 	// In stdio mode the transport is a trusted local pipe, so bearer tokens are
 	// neither resolved nor required.
 	var bearerTokens []string
+	var oauthServer *mcp.OAuthServer
 	if !*stdio {
 		bearerTokens, err = cfg.ResolveBearerTokens(env)
 		if err != nil {
 			return fmt.Errorf("resolve bearer token: %w", err)
+		}
+		if cfg.Auth.OAuth.Enabled() {
+			clientID, clientSecret, err := cfg.ResolveOAuthCredentials(env)
+			if err != nil {
+				return fmt.Errorf("resolve oauth credentials: %w", err)
+			}
+			oauthServer = mcp.NewOAuthServer(clientID, clientSecret)
 		}
 	}
 	if err := cfg.Validate(bearerTokens, !*stdio); err != nil {
@@ -73,28 +83,67 @@ func run() error {
 		return serveStdio(server, log)
 	}
 
-	handler := buildHandler(server, log, bearerTokens)
+	handler := buildHandler(server, log, bearerTokens, oauthServer)
+
+	if cfg.Server.Ngrok.Enabled {
+		return serveNgrok(context.Background(), cfg, env, handler, log)
+	}
+
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	log.Slog().Info("starting", "addr", addr, "workspaces", len(cfg.Workspaces))
 	srv := &http.Server{Addr: addr, Handler: handler}
 	return srv.ListenAndServe()
 }
 
+// serveNgrok dials ngrok and serves the handler over the resulting tunnel.
+// The tunnel URL is logged at startup and requires no external ngrok process.
+func serveNgrok(ctx context.Context, cfg *mcp.Config, env map[string]string, handler http.Handler, log *mcp.Logger) error {
+	authtoken, err := cfg.ResolveNgrokAuthtoken(env)
+	if err != nil {
+		return fmt.Errorf("resolve ngrok authtoken: %w", err)
+	}
+
+	var epOpts []ngrokconfig.HTTPEndpointOption
+	if cfg.Server.Ngrok.Domain != "" {
+		epOpts = append(epOpts, ngrokconfig.WithDomain(cfg.Server.Ngrok.Domain))
+	}
+
+	listener, err := ngrok.Listen(ctx,
+		ngrokconfig.HTTPEndpoint(epOpts...),
+		ngrok.WithAuthtoken(authtoken),
+	)
+	if err != nil {
+		return fmt.Errorf("ngrok listen: %w", err)
+	}
+	log.Slog().Info("starting via ngrok", "url", listener.URL(), "workspaces", len(cfg.Workspaces))
+	return http.Serve(listener, handler)
+}
+
 // buildHandler wires the HTTP routes: an unauthenticated /healthz, plus
 // bearer-protected POST /mcp (JSON-RPC) and GET /mcp (SSE keepalive stream).
-func buildHandler(server *mcp.Server, log *mcp.Logger, bearerTokens []string) http.Handler {
+// If oauthServer is non-nil, OAuth routes are registered and OAuth-issued
+// access tokens are accepted alongside static bearer tokens.
+func buildHandler(server *mcp.Server, log *mcp.Logger, bearerTokens []string, oauthServer *mcp.OAuthServer) http.Handler {
 	rpc := jsonrpc.NewEndpoint()
 	server.Register(rpc)
 
 	bearer := mcp.NewBearer(bearerTokens, log)
+	if oauthServer != nil {
+		bearer = bearer.WithExtra(oauthServer.CheckToken)
+	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-	})
-	mux.Handle("POST /mcp", endpoint.Handler(rpc.Endpoint, bearer))
-	mux.Handle("GET /mcp", endpoint.Handler(sseStream, bearer))
+	mux.Handle("GET /healthz", endpoint.HandleFunc(func(_ http.ResponseWriter, _ *http.Request, _ struct{}) (endpoint.Renderer, error) {
+		return &endpoint.JSONRenderer{Value: "ok"}, nil
+	}, log))
+	if oauthServer != nil {
+		mux.Handle("GET /.well-known/oauth-authorization-server", endpoint.HandleFunc(oauthServer.WellKnownAuthServer, log))
+		mux.Handle("GET /.well-known/oauth-protected-resource", endpoint.HandleFunc(oauthServer.WellKnownProtectedResource, log))
+		mux.Handle("/oauth/authorize", endpoint.HandleFunc(oauthServer.Authorize, log))
+		mux.Handle("POST /oauth/token", endpoint.HandleFunc(oauthServer.Token, log))
+	}
+	mux.Handle("POST /mcp", endpoint.Handler(rpc.Endpoint, bearer, log))
+	mux.Handle("GET /mcp", endpoint.Handler(sseStream, bearer, log))
 	return mux
 }
 
@@ -103,7 +152,7 @@ func buildHandler(server *mcp.Server, log *mcp.Logger, bearerTokens []string) ht
 // and tool gating as the HTTP path by driving the in-process handler with a
 // synthetic request per message. There is no bearer auth: stdio is local and
 // trusted by construction.
-func serveStdio(server *mcp.Server, log *mcp.Logger) error {
+func serveStdio(server *mcp.Server, _ *mcp.Logger) error {
 	rpc := jsonrpc.NewEndpoint()
 	server.Register(rpc)
 	handler := endpoint.Handler(rpc.Endpoint)
