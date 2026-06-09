@@ -28,6 +28,14 @@ type ServerConfig struct {
 	Host  string      `yaml:"host"`
 	Port  int         `yaml:"port"`
 	Ngrok NgrokConfig `yaml:"ngrok"`
+	// AllowedOrigins is the Origin-header allowlist for the Streamable-HTTP
+	// transport (MCP 2025-11-25 DNS-rebinding defense): a request whose Origin is
+	// present but not listed is rejected with 403. Requests with no Origin header
+	// (non-browser clients — the normal case for MCP traffic) are always allowed.
+	// Empty/omitted means an empty allowlist: Origin-less requests pass and ANY
+	// present Origin is rejected. Add a specific origin to permit a browser client
+	// (e.g. local dev), or a single "*" to disable the check.
+	AllowedOrigins []string `yaml:"allowedOrigins"`
 }
 
 // NgrokConfig enables the built-in ngrok tunnel. When enabled, the server

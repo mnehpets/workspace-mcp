@@ -67,7 +67,7 @@ func TestInitializeUnknownProtocolNegotiatesDown(t *testing.T) {
 		ProtocolVersion string `json:"protocolVersion"`
 	}
 	json.Unmarshal(rr.Result, &res)
-	if res.ProtocolVersion != "2025-06-18" {
+	if res.ProtocolVersion != "2025-11-25" {
 		t.Fatalf("expected fallback to newest supported, got %q", res.ProtocolVersion)
 	}
 }

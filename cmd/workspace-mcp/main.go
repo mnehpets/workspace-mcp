@@ -85,7 +85,7 @@ func run() error {
 		return serveStdio(mcp.NewServer(ws, log), log)
 	}
 
-	handler := mcp.BuildHandler(reg, log, bearerTokens, oauthServer)
+	handler := mcp.BuildHandler(reg, log, bearerTokens, oauthServer, cfg.Server.AllowedOrigins)
 
 	if cfg.Server.Ngrok.Enabled {
 		return serveNgrok(context.Background(), cfg, env, handler, log)

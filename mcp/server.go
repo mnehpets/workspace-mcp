@@ -21,7 +21,7 @@ const serverName = "workspace-mcp"
 const serverVersion = "0.1.0"
 
 // supportedProtocols lists MCP protocol versions we understand, newest first.
-var supportedProtocols = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
+var supportedProtocols = []string{"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
 
 // Server holds shared state for the MCP handlers. Each Server is bound to a
 // single workspace: workspace selection happens at the HTTP routing layer (one

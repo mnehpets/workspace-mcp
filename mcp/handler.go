@@ -18,14 +18,19 @@ import (
 // Routes:
 //   - GET  /healthz                                       (unauthenticated)
 //   - OAuth discovery + endpoints                         (when oauthServer != nil)
-//   - POST /mcp/<name>  (JSON-RPC)  + GET /mcp/<name> (SSE keepalive), bearer-gated
-func BuildHandler(reg *Registry, log *Logger, bearerTokens []string, oauthServer *OAuthServer) http.Handler {
+//   - POST /mcp/<name>  (JSON-RPC)  + GET /mcp/<name> (SSE keepalive), origin- and bearer-gated
+//
+// allowedOrigins is the Origin-header allowlist (MCP 2025-11-25 DNS-rebinding
+// defense); empty means Origin-less requests pass and any present Origin is
+// rejected (see NewOriginCheck).
+func BuildHandler(reg *Registry, log *Logger, bearerTokens []string, oauthServer *OAuthServer, allowedOrigins []string) http.Handler {
 	bearer := NewBearer(bearerTokens, log)
 	if oauthServer != nil {
 		// With OAuth on, an unauthenticated request gets a WWW-Authenticate header
 		// pointing at this endpoint's protected-resource metadata (RFC 9728).
 		bearer = bearer.WithExtra(oauthServer.CheckToken).WithResourceMetadata()
 	}
+	origin := NewOriginCheck(allowedOrigins, log)
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", endpoint.HandleFunc(func(_ http.ResponseWriter, _ *http.Request, _ struct{}) (endpoint.Renderer, error) {
@@ -46,8 +51,8 @@ func BuildHandler(reg *Registry, log *Logger, bearerTokens []string, oauthServer
 		srv := NewServer(ws, log)
 		rpc := jsonrpc.NewEndpoint()
 		srv.Register(rpc)
-		mux.Handle("POST /mcp/"+ws.Name, endpoint.Handler(rpc.Endpoint, bearer, log))
-		mux.Handle("GET /mcp/"+ws.Name, endpoint.Handler(sseStream, bearer, log))
+		mux.Handle("POST /mcp/"+ws.Name, endpoint.Handler(rpc.Endpoint, origin, bearer, log))
+		mux.Handle("GET /mcp/"+ws.Name, endpoint.Handler(sseStream, origin, bearer, log))
 	}
 	return mux
 }

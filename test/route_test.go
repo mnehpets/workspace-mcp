@@ -132,7 +132,7 @@ func TestWWWAuthenticateOnOAuth401(t *testing.T) {
 
 	// With OAuth: header present and resource-scoped to the endpoint path.
 	oauth := mcp.NewOAuthServer("client", "supersecretsupersecretsupersecret")
-	h := mcp.BuildHandler(reg, log, []string{"tok"}, oauth)
+	h := mcp.BuildHandler(reg, log, []string{"tok"}, oauth, nil)
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
@@ -154,7 +154,7 @@ func TestWWWAuthenticateOnOAuth401(t *testing.T) {
 	}
 
 	// Without OAuth: no resource_metadata hint (static-bearer-only deployment).
-	h2 := mcp.BuildHandler(reg, log, []string{"tok"}, nil)
+	h2 := mcp.BuildHandler(reg, log, []string{"tok"}, nil, nil)
 	ts2 := httptest.NewServer(h2)
 	defer ts2.Close()
 	req2, _ := http.NewRequest("POST", ts2.URL+"/mcp/notes", strings.NewReader(`{}`))
@@ -178,7 +178,7 @@ func TestProtectedResourceMetadataPerEndpoint(t *testing.T) {
 	reg, _, _ := twoWorkspaceRegistry(t)
 	log := mcp.NewLogger("error", &bytes.Buffer{})
 	oauth := mcp.NewOAuthServer("client", "supersecretsupersecretsupersecret")
-	ts := httptest.NewServer(mcp.BuildHandler(reg, log, []string{"tok"}, oauth))
+	ts := httptest.NewServer(mcp.BuildHandler(reg, log, []string{"tok"}, oauth, nil))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/.well-known/oauth-protected-resource/mcp/notes")
@@ -201,5 +201,62 @@ func TestProtectedResourceMetadataPerEndpoint(t *testing.T) {
 	}
 	if len(doc.AuthorizationServers) != 1 {
 		t.Errorf("expected one authorization server, got %v", doc.AuthorizationServers)
+	}
+}
+
+// TestOriginValidation covers the MCP 2025-11-25 DNS-rebinding defense (task 18).
+// The spec defines no client-sent Origin value, and legitimate MCP traffic here is
+// Origin-less, so we bake in no default allowlist: an empty allowlist accepts
+// Origin-less requests (past the gate, to the 401 since no bearer is sent) and
+// 403s ANY present Origin. An explicit allowlist lets a named browser origin
+// through; "*" disables the check.
+func TestOriginValidation(t *testing.T) {
+	reg, _, _ := twoWorkspaceRegistry(t)
+	log := mcp.NewLogger("error", &bytes.Buffer{})
+
+	// post sends an unauthenticated POST with the given Origin (empty = none) and
+	// returns the status code. 401 means it passed the Origin gate (no bearer
+	// sent); 403 means the Origin gate rejected it.
+	post := func(ts *httptest.Server, origin string) int {
+		req, _ := http.NewRequest("POST", ts.URL+"/mcp/notes", strings.NewReader(`{}`))
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// Empty allowlist (nil): Origin-less passes, ANY present Origin is rejected.
+	def := httptest.NewServer(mcp.BuildHandler(reg, log, []string{"tok"}, nil, nil))
+	defer def.Close()
+	if got := post(def, ""); got != http.StatusUnauthorized {
+		t.Errorf("absent origin: want 401 (past origin gate), got %d", got)
+	}
+	if got := post(def, "https://evil.example"); got != http.StatusForbidden {
+		t.Errorf("present origin (empty allowlist): want 403, got %d", got)
+	}
+	if got := post(def, "https://claude.ai"); got != http.StatusForbidden {
+		t.Errorf("present origin with no allowlist entry: want 403 (no baked-in default), got %d", got)
+	}
+
+	// Explicit allowlist: the named origin passes the gate, others are rejected.
+	named := httptest.NewServer(mcp.BuildHandler(reg, log, []string{"tok"}, nil, []string{"http://localhost:6274"}))
+	defer named.Close()
+	if got := post(named, "http://localhost:6274"); got != http.StatusUnauthorized {
+		t.Errorf("allowlisted origin: want 401 (past origin gate), got %d", got)
+	}
+	if got := post(named, "https://evil.example"); got != http.StatusForbidden {
+		t.Errorf("non-allowlisted origin: want 403, got %d", got)
+	}
+
+	// "*" disables the check: an arbitrary origin reaches the auth layer.
+	any := httptest.NewServer(mcp.BuildHandler(reg, log, []string{"tok"}, nil, []string{"*"}))
+	defer any.Close()
+	if got := post(any, "https://evil.example"); got != http.StatusUnauthorized {
+		t.Errorf("wildcard origin: want 401 (past origin gate), got %d", got)
 	}
 }
