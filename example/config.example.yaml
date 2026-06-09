@@ -15,6 +15,16 @@ server:
   #     env: NGROK_AUTHTOKEN        # resolved from secrets.env / OS env
   #   domain: my-reserved-host.ngrok.app   # optional: pin a reserved domain
 
+  # Origin-header allowlist (Streamable-HTTP DNS-rebinding defense, MCP 2025-11-25).
+  # A request whose Origin header is PRESENT but not listed is rejected with 403.
+  # Requests with no Origin header (non-browser clients — the normal case for MCP
+  # traffic, including claude.ai's cloud connector) are always allowed. Omitted
+  # means an empty allowlist: Origin-less requests pass and ANY present Origin is
+  # rejected (a present Origin can only be a browser — the rebinding case). Add an
+  # origin to allow a browser client (e.g. local dev), or ["*"] to disable.
+  # allowedOrigins:
+  #   - http://localhost:6274   # e.g. the MCP Inspector UI, if you drive it from a browser
+
 auth:
   bearerToken:
     env: MCP_BEARER_TOKEN         # resolved from secrets.env / OS env, never stored here

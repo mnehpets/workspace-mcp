@@ -630,20 +630,30 @@ Pick up the revision's relevant deltas. Most of the 2025-11-25 changes don't tou
 read-only tools-only server (tasks, OIDC discovery — already done, incremental scope —
 N/A with one global scope, sampling/elicitation/roots — client features, icons —
 cosmetic). Two small ones are worth taking; a third lives in §17 (`WWW-Authenticate`).
-- [ ] **Negotiate `2025-11-25`.** Prepend it to `supportedProtocols` (newest-first)
+- [x] **Negotiate `2025-11-25`.** Prepend it to `supportedProtocols` (newest-first)
       ([mcp/server.go]); the existing fallback logic needs no other change.
-- [ ] **Origin-header validation → HTTP 403.** This revision makes it explicit:
+- [x] **Origin-header validation → HTTP 403.** This revision makes it explicit:
       Streamable HTTP servers must reject invalid `Origin` with 403 (DNS-rebinding
-      defense). Add an allowlisted-origins check ahead of `/mcp` in `buildHandler`
-      ([cmd/workspace-mcp/main.go]) — configurable, defaulting to the claude.ai origin;
-      most relevant on the ngrok-fronted path.
-- [ ] **Confirm input-validation errors stay tool-execution errors** (SEP-1303), not
-      JSON-RPC protocol errors — our `INVALID_ARGS` already returns via the `isError`
-      envelope (§13 / design §5.4); just verify the unmarshal path doesn't bubble a
-      protocol error instead, so the model can self-correct.
+      defense). Add an allowlisted-origins check ahead of `/mcp`. *(Implemented as the
+      `OriginCheck` processor in [mcp/origin.go], wired into the per-workspace `/mcp/<name>`
+      chain ahead of `Bearer` in `BuildHandler` ([mcp/handler.go]); configured via
+      `server.allowedOrigins`, with `["*"]` to disable. The spec defines no client-sent
+      Origin value and legitimate MCP traffic here is Origin-less, so there is NO baked-in
+      default: an empty allowlist accepts Origin-less requests and 403s any present Origin
+      (the only thing that sends one is a browser — the rebinding case) before auth runs.
+      Note: for this server auth is the real boundary — the Origin check is spec-required
+      defense-in-depth, load-bearing only for an unauthenticated browser-reachable
+      plain-HTTP localhost deployment.)*
+- [x] **Confirm input-validation errors stay tool-execution errors** (SEP-1303), not
+      JSON-RPC protocol errors. *(Verified: `unmarshalArgs` ([mcp/tools.go]) returns an
+      `INVALID_ARGS` `*toolError`, which `ToolsCall` ([mcp/server.go]) maps to an `isError`
+      result with a `nil` JSON-RPC error — the unmarshal path never bubbles a protocol
+      error, so the model can self-correct.)*
 - **Done when:** `initialize` negotiates `2025-11-25`, a request with a disallowed
       `Origin` gets a 401-independent 403, and the arg-validation path is confirmed to
-      surface as a tool error.
+      surface as a tool error. ✓ *(All green; new `TestOriginValidation` covers the 403/
+      pass-through cases, `TestInitializeUnknownProtocolNegotiatesDown` updated to the new
+      newest version.)*
 
 ### 19. Prompts — optional `prompts/` dir → `prompts/list` + `prompts/get`
 Serve user-authored prompt templates from an optional per-workspace directory, via
