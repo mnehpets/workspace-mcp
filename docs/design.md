@@ -97,18 +97,26 @@ freely.**
   (until the deferred patch task lands behind a flag). The `*os.Root` is used only
   for read methods.
 - **Auth is layered:** a server-wide bearer token (constant-time compared, ≥ 32
-  bytes, sourced from `.env`/OS env — never from `config.yaml`), plus the ngrok
-  edge (OAuth/IP-allow/reserved domain). 401 on missing/invalid with no hint as to
-  which. AuthN is server-wide; **AuthZ is per-workspace policy**.
-  - **Multiple tokens for rotation.** Config accepts either a single
+  bytes, sourced from `secrets.env`/OS env — never from `config.yaml`), and/or an
+  OAuth 2.0 authorization code flow (for clients such as claude.ai that only support
+  OAuth). 401 on missing/invalid with no hint as to which. AuthN is server-wide;
+  **AuthZ is per-workspace policy**.
+  - **Multiple static tokens for rotation.** Config accepts either a single
     `auth.bearerToken` or a list `auth.bearerTokens` (not both). The server accepts
     a request bearing *any* configured token, so an old and new token can both be
-    valid during an overlap window — add the new, switch claude.ai over, drop the
-    old — without lockstep. The presented token is digested and compared against
-    every expected one **without short-circuiting**, so timing reveals neither the
-    token nor which (if any) matched ([auth/bearer.go]). This is the minimal slice
-    of the larger "per-client tokens / scoping / hot-reload" idea (still future);
-    tokens here carry no identity and aren't distinguished in the audit log.
+    valid during an overlap window — add the new, switch clients over, drop the old
+    — without lockstep. The presented token is digested and compared against every
+    expected one **without short-circuiting**, so timing reveals neither the token
+    nor which (if any) matched ([mcp/auth.go]).
+  - **OAuth access and refresh tokens** are self-contained AEAD blobs
+    (ChaCha20-Poly1305), with keys derived via HKDF from `auth.oauth.clientSecret`
+    using **distinct info strings per token type** — so an access token cannot be
+    presented as a refresh token, or vice versa. No server-side token store;
+    validation is decryption + expiry check. Rotating the client secret immediately
+    invalidates all outstanding tokens of both kinds. Access tokens expire after
+    1 hour, refresh tokens after 30 days; auth codes (held in memory, single-use)
+    after 2 minutes. The token endpoint issues a fresh access/refresh pair for both
+    the `authorization_code` and `refresh_token` grants ([mcp/oauth.go]).
 - **Audit log:** every call records method, tool, workspace, resolved path(s),
   allow/deny + reason, and byte/match counts — never file contents, never the
   token ([mcp/server.go:154] `ToolsCall` → `s.log.ToolCall(ev)`).
@@ -117,71 +125,72 @@ freely.**
 
 ## 3. Division of functionality (package map)
 
-Packages live at the **repo root**, not under `internal/` — this is an
-application, not a library for external import, so `internal/` would add nesting
-without buying anything. Each package has one job, and the dependency arrows point
-one way: `mcp` orchestrates; everything below it is a mechanism that knows nothing
-about MCP.
+All application logic lives in `mcp/` — config, secrets, auth, registry, sandbox,
+policy, search, logging, and the protocol surface are all one package, avoiding the
+nesting overhead of `internal/` subdirectories for what is a single-binary app.
+`grrep/` (vendored) and `gitaware/` remain separate because they have distinct
+ownership and trust properties (see §2.2). Dependency arrows point one way: the
+`mcp` package orchestrates; `grrep` and `gitaware` know nothing about MCP.
 
 ```
-cmd/shim/main.go     Wiring + transports. Loads config+secrets, builds the
+cmd/workspace-mcp/main.go   Wiring + transports. Loads config+secrets, builds the
                      workspace registry, mounts HTTP routes (/healthz, POST/GET
-                     /mcp) or the -stdio loop. The only package that knows about
+                     /mcp) or the -stdio loop. The only file that knows about
                      net/http and process lifecycle.
 
-config/              Pure config. config.go: typed YAML load with KnownFields(true)
-                     + semantic Validate(). secrets.go: dotenv + os.Environ merge,
-                     {env: NAME} reference resolution. No I/O beyond reading files.
-
-auth/                Bearer-token endpoint.Processor. Constant-time compare; 401
-                     with no disclosure. Wired ahead of every route but /healthz.
-
-workspace/           The registry: name → Workspace{ *os.Root, Policy, Ignore,
-                     Read/Grep settings, IsGitRepo }. Built once at startup.
-                     Lookup by name → UNKNOWN_WORKSPACE otherwise. This is where a
-                     tool call turns a `workspace` string into capabilities.
-
-fsroot/              The os.Root wrapper. Clean() rejects absolute/`..` paths;
+mcp/                 Everything except the vendored search core and git layer.
+  config.go          Typed YAML load with KnownFields(true) + semantic Validate().
+  secrets.go         dotenv + os.Environ merge, {env: NAME} reference resolution.
+                     No I/O beyond reading files.
+  auth.go            Bearer-token + OAuth 2.0 endpoint.Processor. Constant-time
+                     compare; 401 with no disclosure. Wired ahead of every route
+                     but /healthz.
+  oauth.go           OAuth 2.0 authorization code flow (required for claude.ai
+                     connectors). Self-contained AEAD access tokens; no server-side
+                     store.
+  registry.go        The workspace registry: name → Workspace{ *os.Root, Policy,
+                     Ignore, Read/Grep settings, IsGitRepo }. Built once at startup.
+                     Lookup by name → UNKNOWN_WORKSPACE otherwise. Also resolves
+                     workspace descriptions and wellKnownFiles at startup.
+  root.go            The os.Root wrapper. Clean() rejects absolute/`..` paths;
                      Open/Stat/ReadDir/WalkDir take workspace-relative paths and
                      stay in the sandbox. The containment primitive.
-
-policy/              Glob allow/deny (block wins) + dotfile rule. CheckFile/CheckDir
-                     return {Allowed, Reason}. The soft layer atop fsroot.
+  policy.go          Glob allow/deny (block wins) + dotfile rule. CheckFile/CheckDir
+                     return {Allowed, Reason}. The soft layer atop root.go.
+  walk.go            fastwalk traversal: .git/dotfile skip, IgnoreSet + policy
+                     filter, NUL-byte binary skip, each leaf opened via os.Root,
+                     worker pool, match cap.
+  search.go          tree_search engine: path-glob boundary + AND-combined where
+                     predicates + frontmatter-fence splitting. Drives walk.go.
+  log.go             Redacting slog logger. ToolEvent carries the per-call record;
+                     never logs content or the token.
+  server.go          The protocol surface and the gate: initialize / tools/list /
+                     tools/call / ping, error model, dispatch table.
+  tools.go           Tool catalog + JSON Schemas + one handler per tool, each
+                     running the full gate (resolve workspace → enablement →
+                     path policy → root/search/gitaware → limits → audit).
 
 grrep/               Vendored from bep/grrep (Apache-2.0, SPDX retained, see
                      NOTICE). match.go verbatim (Matcher + literal pre-filter);
                      scan.go adapted to emit structured {path,line,text} instead of
                      CLI stdout; ignore.go = IgnoreSet (nested .gitignore/.ignore).
 
-search/              Drives grrep over a workspace. search.go: the tree_search
-                     engine — path glob + AND-combined where predicates, fastwalk
-                     + per-leaf os.Root open + policy/ignore filter + worker pool
-                     + match cap, with frontmatter-fence splitting.
-
 gitaware/            go-git (pure Go) git-awareness, metadata only. detect.go
                      (is it a repo?), status.go (Worktree().Status() + branch),
                      tracked.go (tracked-file enumeration). Never a content path.
 
-mcp/                 The protocol surface and the gate. server.go: initialize /
-                     tools/list / tools/call / ping, error model, dispatch table.
-                     tools.go: tool catalog + JSON Schemas + one handler per tool,
-                     each running the full gate (resolve workspace → enablement →
-                     path policy → fsroot/search/gitaware → limits → audit).
-
-audit/               Redacting slog logger. ToolEvent carries the per-call record;
-                     never logs content or the token.
 ```
 
-The shape of a tool call, end to end ([mcp/server.go:154], [mcp/tools.go]):
+The shape of a tool call, end to end ([mcp/server.go], [mcp/tools.go]):
 
 ```
-POST /mcp → bearer (auth/) → jsonrpc dispatch → ToolsCall
+POST /mcp → bearer (mcp/auth.go) → jsonrpc dispatch → ToolsCall
   → allowlist tool name (else JSON-RPC InvalidParams)
   → handler: unmarshal args
-           → resolve `workspace` (workspace/)        → UNKNOWN_WORKSPACE
+           → resolve `workspace` (mcp/registry.go)   → UNKNOWN_WORKSPACE
            → per-workspace enablement (grep on? git?) → GREP_DISABLED / NOT_A_GIT_REPO
-           → fsroot.Clean(path) + policy.CheckFile/Dir → POLICY_DENIED
-           → do the one read (fsroot / search / gitaware)
+           → root.Clean(path) + policy.CheckFile/Dir  → POLICY_DENIED
+           → do the one read (mcp/root.go / search / gitaware)
            → apply size/match limits
   → audit-log the ToolEvent (allow/deny + reason + counts)
   → wrap result as MCP content (or isError)
@@ -195,7 +204,7 @@ Config is a **YAML file** (`-config`, default `./config.yaml`), chosen over flat
 `KEY=value` because the shape is genuinely nested — a list of workspaces, each
 with its own policy globs, read/grep limits. Parsed into a typed struct with
 `KnownFields(true)` so an unknown key is an *error*, not a silent typo
-([config/config.go:77]). Validated semantically at startup ([config/config.go:94]):
+([mcp/config.go]). Validated semantically at startup ([mcp/config.go]):
 ≥ 1 workspace, unique names, a `default` must exist (it's the fallback for the
 `workspace` param), each `root` exists and is a directory, globs compile,
 `read.maxBytes` positive, and (HTTP mode only) port in range + resolved bearer
@@ -211,13 +220,13 @@ auth:
     env: SHIM_BEARER_TOKEN     # name of an env var to read the value from
 ```
 
-Resolution order ([config/secrets.go]): read the `.env` file (`-env`, default
-`./.env`) via `godotenv`, then overlay `os.Environ()` so the **OS environment
+Resolution order ([mcp/secrets.go]): read the `secrets.env` file (`-env`, default
+`./secrets.env`) via `godotenv`, then overlay `os.Environ()` so the **OS environment
 overrides** dotenv (a deployment can inject the token without a file), then
 resolve each `{ env: NAME }` against the merged map. A missing/empty referenced
 var is a startup error. A plain-string literal is *allowed but discouraged* for
-`bearerToken`. Commit `config.example.yaml` + `.env.example`; gitignore the real
-`config.yaml` + `.env`.
+`bearerToken`. Commit `example/config.example.yaml` + `example/secrets.example.env`; gitignore the real
+`config.yaml` + `secrets.env`.
 
 For **rotation**, `auth` accepts a list `bearerTokens: [ {env: A}, {env: B} ]` in
 place of the single `bearerToken` (set one or the other, not both); each resolves
@@ -227,11 +236,17 @@ the same way and each must be ≥ 32 bytes. See §2.3.
 
 ```yaml
 server:
-  host: 127.0.0.1                 # localhost only; ngrok fronts it
+  host: 127.0.0.1                 # localhost only; used when ngrok disabled
   port: 3850
-  publicURL: https://<reserved-subdomain>.ngrok.app
+  ngrok:                          # built-in tunnel; host/port ignored when enabled
+    enabled: true
+    authtoken: { env: NGROK_AUTHTOKEN }
+    domain: my-host.ngrok.app     # optional: pin a stable domain
 auth:
   bearerToken: { env: SHIM_BEARER_TOKEN }
+  oauth:                          # OAuth 2.0 authorization code flow (required by claude.ai)
+    clientID: workspace-mcp       # public; stored directly in config
+    clientSecret: { env: OAUTH_CLIENT_SECRET }
 workspaces:                       # one or more; `workspace` param selects, default "default"
   - name: default
     root: /absolute/path/to/tree  # this workspace's os.Root sandbox
@@ -257,7 +272,7 @@ independently.
 
 The transport is **Streamable HTTP**: `POST /mcp` carries JSON-RPC 2.0
 (`jsonrpc.Endpoint`), `GET /mcp` is the SSE stream; a `-stdio` mode reuses the
-same dispatch over a local pipe with no bearer ([cmd/shim/main.go]). MCP *is*
+same dispatch over a local pipe with no bearer ([cmd/workspace-mcp/main.go]). MCP *is*
 JSON-RPC 2.0, so the whole surface is the reflection-based jsonrpc registry from
 `github.com/mnehpets/http`; slash-named methods use the `_ jsonrpc:"…"` struct-tag
 override ([mcp/server.go:48]).
@@ -307,7 +322,7 @@ Discover the configured trees. No params.
   priority-ordered and capped at 5. `description` is the config `description` if
   set, else the first section of the highest-priority detected file (heading prose,
   whitespace-collapsed, capped). Both computed once at startup
-  ([workspace/registry.go]).
+  ([mcp/registry.go]).
 
 #### `file_read`
 Read one allowed file, optionally a line span.
@@ -381,7 +396,7 @@ search over the vendored grrep core.
   shared state — the results slice and the (non-thread-safe) gogitignore tree's
   `Match`/`EnsureNode` — under a mutex; the candidate scan then runs through its
   own worker pool writing to per-index slots (deterministic, path-sorted before
-  the cap). ([search/walk.go], [mcp/tools.go])
+  the cap). ([mcp/walk.go], [mcp/tools.go])
 
 #### `git_status`
 Read-only status, git-repo workspaces only.
@@ -451,7 +466,7 @@ priority-ordered and capped. The choice is deliberately convention-over-config: 
 per-workspace list would be a usability tax that rots on every rename, whereas a
 freshly-pointed workspace "just works" if it follows any common doc/notes
 convention. To teach the server a new name, add a stem in code (with a test) — not
-a config knob ([workspace/registry.go]). The same priority order
+a config knob ([mcp/registry.go]). The same priority order
 picks which file the `description` falls back to.
 
 **Truncation steers, it doesn't just flag.** When a result is capped
@@ -466,7 +481,7 @@ treat a partial result as complete.
 
 - **Streamable HTTP first.** `POST /mcp` (JSON-RPC) + `GET /mcp` (SSE keepalive via
   `SSERenderer`), both behind the bearer `Processor`; `/healthz` is unauthenticated
-  ([cmd/shim/main.go:95]).
+  ([cmd/workspace-mcp/main.go:95]).
 - **stdio mode** (`-stdio`) is **mostly for testing and local development** (MCP
   Inspector, Claude Desktop/Code as a subprocess) — it is *not* the primary use
   case. The point of this server is remote: claude.ai / ChatGPT reaching local
@@ -474,11 +489,15 @@ treat a partial result as complete.
   dispatch and tool gating, no HTTP listener, no bearer (trusted local pipe). It
   currently reuses the HTTP path via a synthetic `httptest` round-trip per message
   — a known shim to be replaced by a transport-agnostic `jsonrpc` dispatch entry
-  point later ([cmd/shim/main.go:147]). Note claude.ai itself only connects to
+  point later ([cmd/workspace-mcp/main.go:147]). Note claude.ai itself only connects to
   *remote* MCP servers, so stdio is never the claude.ai path.
-- **Exposure.** The server binds `127.0.0.1`; **ngrok (or equivalent) exposes only
-  this server** over HTTPS, with edge auth (OAuth / IP-allow / reserved domain) on
-  top of the bearer. claude.ai reaches it as a custom connector / remote MCP.
+- **Exposure.** With `server.ngrok.enabled: false` (default) the server binds
+  `127.0.0.1:PORT` and an external reverse proxy or ngrok process fronts it. With
+  `server.ngrok.enabled: true` the server dials ngrok directly via the Go SDK —
+  no external process or `ngrok.yml` needed. claude.ai reaches it as a custom
+  connector / remote MCP, authenticating via the OAuth 2.0 authorization code flow
+  (`GET /oauth/authorize` → approve page → `POST /oauth/token` → AEAD access +
+  refresh token pair; the refresh token buys a new pair without re-approval).
 
 ---
 
@@ -501,3 +520,11 @@ search already finds metadata values as plain text. (Richer `workspace_list` wit
 `description`/`wellKnownFiles`, ranged `file_read`, raw-binary `file_read`, and the
 consolidated `tree_search` have since landed.) Anything that would have the server
 rank by meaning, build graphs, or summarize is **out** — that is the model's job.
+
+**MCP `resources/list` + `resources/read` — considered, deprioritized.** The
+protocol's resources surface fits a workspace's files naturally, but resources are
+*application-driven*: in practice a **human** browses/attaches them, and LLMs don't
+reliably request them without a strong user hint. That's a category mismatch with
+this server's premise — the *model* should automatically discover and select files
+while it reasons — so the dependable surface stays **tools** (`tree_search` +
+`file_read`).

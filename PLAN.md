@@ -136,7 +136,7 @@ From that library (confirmed by reading source):
 - **`endpoint.SSERenderer`** — iterator-based SSE for the Streamable-HTTP stream.
 
 To add (the library lacks it): a constant-time **bearer-token `Processor`**
-(`auth/` package), 401 on missing/invalid, no disclosure of which. Upstream later
+(`mcp/auth.go`), 401 on missing/invalid, no disclosure of which. Upstream later
 only if clean.
 
 Other deps:
@@ -281,7 +281,8 @@ Validation: at least one workspace; names unique; a workspace named `default`
 should exist (it's the `workspace` param's fallback — without it, every call must
 name a workspace explicitly); each `root` exists & is a directory; globs compile;
 every `{ env: … }` reference resolves to a non-empty value. Commit
-`config.example.yaml` and `.env.example`; gitignore `config.yaml` and `.env`.
+`example/config.example.yaml` and `example/secrets.example.env`; gitignore
+`config.yaml` and `secrets.env`.
 Config parsed with `gopkg.in/yaml.v3` into a typed struct; `KnownFields(true)` so
 unknown keys are an error, not a silent typo.
 
@@ -451,49 +452,59 @@ logged.
 
 ## 11. Repository layout
 
-> The directory is still named `vscode-mcp-shim` from earlier iterations. Rename
-> to e.g. `workspace-mcp` when convenient (out of MVP scope).
-
 ```text
 workspace-mcp/
   PLAN.md
   README.md
-  NOTICE                   # attribution for vendored grrep (Apache-2.0)
+  NOTICE                         # attribution for vendored grrep (Apache-2.0)
   go.mod
-  config.example.yaml      # committed; copy to config.yaml (gitignored)
-  .env.example             # committed; copy to .env (gitignored) for secrets
-  .gitignore               # ignores config.yaml and .env
-  cmd/shim/main.go         # wire config, workspaces, MCP endpoint, listen
-  config/
-    config.go              # YAML load + validation (typed struct)
-    secrets.go             # godotenv + os.Environ merge; resolve {env:NAME} refs
-  workspace/registry.go    # name → {*os.Root, policy, IgnoreSet, isGitRepo}
+  .gitignore
+  example/
+    config.example.yaml          # copy to config.yaml (gitignored) and edit
+    secrets.example.env          # copy to secrets.env (gitignored) for secrets
+    mcp.example.json             # .mcp.json template for Claude CLI registration
+  cmd/workspace-mcp/
+    main.go                      # wire config, workspaces, MCP endpoint, listen
+    main_test.go
   mcp/
-    server.go              # initialize / tools/list / tools/call
-    tools.go               # workspace_list/tree_*/file_*/git_* defs + JSON schemas
-  fsroot/root.go           # os.Root wrapper: safe open/read/list/walk (per workspace)
-  policy/policy.go         # glob allow/deny, dotfile rules (per workspace)
-  grrep/                   # vendored from bep/grrep (Apache-2.0, SPDX retained)
-    match.go               #   verbatim: Matcher + CompileMatcher
-    scan.go                #   adapted: scan core → structured {path,line,text}
-    ignore.go              #   IgnoreSet (gogitignore): nested .gitignore/.ignore
-  search/
-    search.go              # tree_search engine: path glob + where predicates,
-                           #   fastwalk + os.Root leaf-open, frontmatter-fence split
+    config.go                    # YAML load + validation (typed struct)
+    secrets.go                   # godotenv + os.Environ merge; resolve {env:NAME} refs
+    auth.go                      # bearer-token + OAuth 2.0 Processor
+    oauth.go                     # OAuth 2.0 authorization code flow
+    registry.go                  # name → {*os.Root, policy, IgnoreSet, isGitRepo}
+    root.go                      # os.Root wrapper: safe open/read/list/walk (per workspace)
+    policy.go                    # glob allow/deny, dotfile rules (per workspace)
+    search.go                    # tree_search engine: path glob + where predicates,
+                                 #   frontmatter-fence split
+    walk.go                      # fastwalk traversal + os.Root leaf-open + worker pool
+    log.go                       # redacting slog logger
+    server.go                    # initialize / tools/list / tools/call
+    tools.go                     # workspace_list/file_read/tree_search/git_status defs
+  grrep/                         # vendored from bep/grrep (Apache-2.0, SPDX retained)
+    match.go                     #   verbatim: Matcher + CompileMatcher
+    scan.go                      #   adapted: scan core → structured {path,line,text}
+    ignore.go                    #   IgnoreSet (gogitignore): nested .gitignore/.ignore
   gitaware/
-    detect.go              # is this tree a git repo? (go-git PlainOpen)
-    status.go              # go-git Worktree().Status() + branch
-    tracked.go             # tracked-file enumeration (index/worktree)
-  auth/bearer.go           # bearer-token endpoint.Processor
-  audit/log.go             # redacting structured logger
-  patch/patch.go           # (deferred task) go-gitdiff apply, sandboxed writes
+    detect.go                    # is this tree a git repo? (go-git PlainOpen)
+    status.go                    # go-git Worktree().Status() + branch
+    tracked.go                   # tracked-file enumeration (index/worktree)
+  openspec/                      # OpenAPI specs and changelogs
+    specs/
+    changes/
   test/
-    fsroot_escape_test.go  # symlink/.. escape attempts must fail
+    auth_test.go
+    fileread_binary_test.go
+    fileread_range_test.go
+    fsroot_escape_test.go        # symlink/.. escape attempts must fail
+    gitaware_test.go
+    integration_test.go
+    mcp_test.go                  # only workspace_list/file_read/tree_search/git_status exposed
+    mcphelp_test.go
+    orientation_test.go
     policy_test.go
-    secrets_test.go        # env override + {env:NAME} resolution
-    mcp_list_test.go       # only workspace_list/tree_*/file_*/git_* exposed
-    workspace_test.go      # unknown workspace, cross-workspace isolation
-    search_test.go         # tree_search: path glob, where predicates, fence split
+    search_test.go               # tree_search: path glob, where predicates, fence split
+    secrets_test.go              # env override + {env:NAME} resolution
+    workspace_test.go            # unknown workspace, cross-workspace isolation
 ```
 
 Packages live at the repo root, not under `internal/` — this is an application,
@@ -503,124 +514,6 @@ buying anything.
 ---
 
 ## 12. Task list
-
-Ordered, self-contained sections. Work top to bottom; each section is independently
-buildable, has its own tests, and ends with a **Done when** gate. Don't start a
-section until the previous one's gate is green. Sections 3–4 are the security
-spine — nothing that serves content to the model ships before their escape/policy
-tests pass.
-
-### 1. Scaffold, config, secrets, health
-- [x] Module + directory skeleton per §11; `go build ./...` clean.
-- [x] `config/`: load the `-config` YAML (default `./config.yaml`) into a typed
-      struct via `gopkg.in/yaml.v3` with `KnownFields(true)`. Supports a
-      `workspaces` list.
-- [x] `config/secrets.go`: `godotenv` reads `-env` (default `./.env`) into
-      a `map[string]string`; overlay `os.Environ()` (OS **overrides** dotenv);
-      resolve each `{ env: NAME }` config reference (e.g. `auth.bearerToken`) — a
-      missing/empty referenced var is a startup error.
-- [x] Validate: ≥ 1 workspace, unique names, a `default` exists; each `root` is an
-      existing dir; port in range; resolved `bearerToken` ≥ 32 bytes; globs compile.
-- [x] `audit/`: `slog` logger that redacts the bearer token and never logs file
-      contents.
-- [x] `cmd/shim`: wire config + secrets + logger; serve `GET /healthz` → `{"ok":true}`.
-- [x] `config.example.yaml` + `.env.example` committed; `config.yaml` + `.env`
-      gitignored.
-- **Done when:** `go run ./cmd/shim -config config.yaml -env .env` serves
-  `/healthz`; malformed/unknown-key config or an unresolved secret fails fast with
-  a clear error.
-
-### 2. Bearer auth
-- [x] `auth/`: constant-time bearer `endpoint.Processor`; 401 on missing/invalid
-      with no hint as to which.
-- [x] Wire it ahead of every route except `/healthz`.
-- [x] Tests: missing / wrong / valid token; assert the token never appears in logs.
-- **Done when:** unauthenticated requests get 401, valid passes, redaction test green.
-
-### 3. Sandbox core — `fsroot` over `os.Root` + workspace registry (the spine)
-- [x] `fsroot/`: open a tree's `root` with `os.OpenRoot`; expose safe
-      `Open`/`Stat`/`ReadDir`/walk taking workspace-relative paths.
-- [x] `workspace/`: build a registry at startup — one entry per configured
-      workspace holding `{*os.Root, policy, IgnoreSet, isGitRepo}` (git-ness via
-      `gitaware.Detect`). Lookup by name; `UNKNOWN_WORKSPACE` otherwise.
-- [x] Reject model paths that are absolute or contain `..` before resolution;
-      everything else resolves through that workspace's `*os.Root`.
-- [x] **`fsroot_escape_test.go` (the centerpiece):** absolute path rejected; `..`
-      rejected; in-tree symlink → `/etc/passwd` cannot read it; in-tree symlink to
-      another in-tree file behaves; concurrent-rename/TOCTOU cannot escape.
-- [x] `workspace_test.go`: unknown workspace rejected; a path valid in one
-      workspace cannot reach another's tree.
-- **Done when:** every escape test fails to read anything outside the root, and
-  cross-workspace access is impossible. The boundary is ours and provable.
-
-### 4. Path policy
-- [x] `policy/`: `policy.allowGlobs` allow + `policy.blockGlobs` deny (deny always
-      wins); dotfile rule; shares the absolute/`..` rejection with fsroot.
-- [x] Tests: allowed globs pass; `.env`, `.git/**`, keys, `node_modules` blocked;
-      `docs/../.env` blocked; dotfiles handled per rule.
-- **Done when:** policy tests green; a path must clear **both** fsroot and policy
-  to be served.
-
-### 5. Search — vendor & adapt grrep
-- [x] `grrep/` package: `match.go` **verbatim** (SPDX retained); scan core adapted
-      to emit structured `{path,line,text}`; `IgnoreSet` (gogitignore); add `NOTICE`.
-- [x] `search/grep.go`: `fastwalk` traversal with `.git`/dotfile skip, the
-      workspace's `IgnoreSet` + policy filter, NUL-byte binary skip, **each leaf
-      opened via `os.Root`**, worker pool sized by the workspace's `grep.workers`,
-      cap `grep.maxMatches`.
-- [x] `search/find.go`: fuzzy filename search over the filtered tree.
-- [x] Tests: literal + regex hit; `fixedString`/`caseInsensitive`/`wordBoundary`;
-      ignore + policy respected; binary skipped; cap → `truncated`.
-- **Done when:** grep/find return correct in-sandbox results, no external binary.
-
-### 6. Git-awareness — go-git
-- [x] `gitaware/`: `Detect(root)` (is it a git repo?); `git_status` via
-      `Worktree().Status()` + branch from `repo.Head()`; tracked-file enumeration
-      via index/worktree.
-- [x] Tests against a temp repo with staged / unstaged / untracked files, and a
-      non-git tree (Detect false → `git_status` yields `NOT_A_GIT_REPO`).
-- **Done when:** status returns branch + per-file codes on git workspaces and
-  `NOT_A_GIT_REPO` on others; no `git` binary used.
-
-### 7. MCP server — handshake + tool-list invariant
-- [x] `mcp/`: register `initialize`, `notifications/initialized`, `tools/list`,
-      `tools/call` on the jsonrpc endpoint (slash names via `_ jsonrpc:"…"`).
-- [x] `initialize` returns protocol version + `{capabilities:{tools:{}}}`; reject
-      unsupported versions.
-- [x] `tools/list` returns only `workspace_list` + `tree_*` / `file_*` / `git_*`
-      with JSON Schemas (each tool but `workspace_list` includes a `workspace` param).
-- [x] `mcp_list_test.go`: no other surface leaks; `tools/call` rejects unknown
-      tool names.
-- **Done when:** an MCP client completes the handshake and sees only intended tools.
-
-### 8. Read tools wired through `tools/call`
-- [x] Implement `workspace_list` / `file_read` / `tree_search` / `git_status`
-      (`tree_list` + `tree_find` + `tree_grep` were consolidated into
-      `tree_search`, §8.4), each (except `workspace_list`): bearer (done) →
-      name allowlist → schema validate → resolve `workspace` → per-workspace
-      enablement → path policy → fsroot/search/gitaware → size/count limits →
-      audit log.
-- [x] Map failures to the error spec (§13).
-- [x] Integration test: two workspaces (one git, one not) + sample files + a
-      symlink escape + a `.env`; `initialize` → `tools/list` → `workspace_list` →
-      `tree_search` (enumerate) → `file_read` → `tree_search` (content) →
-      `git_status`; allowed succeed,
-      escapes/blocked/unknown-workspace/non-git fail; audit records present.
-- **Done when:** all read tools work end-to-end and the integration test is green.
-
-### 9. Transport + ngrok
-- [x] `POST /mcp` (jsonrpc) + `GET /mcp` (SSE via `SSERenderer`), Streamable-HTTP.
-- [x] Docs: `ngrok http 127.0.0.1:<server.port>` exposes only this server; reserved
-      domain + edge auth; example `ngrok.yml`. Never expose anything else.
-- **Done when:** reachable through the tunnel; unauthorized requests fail at both
-  edge and server.
-
-### 10. claude.ai connector + docs
-- [x] README: add as a custom connector (URL + bearer), the safety model, the
-      read-only guarantee, example prompts, shutdown.
-- [x] Manual verify: a live claude.ai session lists / reads / greps the repo and
-      **cannot** reach any write/shell tool.
-- **Done when:** a real claude.ai session drives the read tools end-to-end. ← MVP.
 
 ### 11. Deferred — `tree_patch` (writes, done right) · flag, default off
 The payoff of going standalone. Do **not** start until sections 1–10 are green.
@@ -636,110 +529,6 @@ The payoff of going standalone. Do **not** start until sections 1–10 are green
       partial write.
 - **Done when:** patches apply deterministically and reversibly via Git; conflicts
   and out-of-policy/escape targets are refused. Deterministic, no second LLM.
-
-### 12. Richer `workspace_list` — purpose + well-known files
-Independent of the patch task; can land any time after MVP (§8.1). Promotes the
-"Enrich workspace descriptions" and (partly) "Repo manifest" bullets from §16.
-- [x] Config: add an optional `description` string per workspace (parsed by
-      `config/`; `KnownFields(true)` already in place). Discouraged-but-allowed to
-      omit. No secret handling.
-- [x] Registry (`workspace/`): at startup resolve a `description` per workspace —
-      config value if set, else the first section of the tree's `README.md` (text
-      under the first heading, whitespace-collapsed, trimmed to a small char cap),
-      else empty. Read the README **through the workspace's `os.Root` + policy**
-      (it's content); a blocked/missing README simply yields no description.
-- [x] Registry: detect which of a fixed set — `README.md`, `AGENTS.md`,
-      `CLAUDE.md` — exist at the tree root (presence only, via `Root.Stat`).
-      Compute once at startup; store on the registry entry. (Task §12.17 later
-      broadens this to a server-maintained recognizer — auto-detecting common doc/
-      notes conventions like `index.md` by convention, still no config.)
-- [x] `mcp/`: extend `workspace_list`'s result to include `description` (string,
-      omitempty) and `wellKnownFiles` (string array). Still no params (no
-      inputSchema change); still never exposes roots.
-- [ ] Optionally fold `description` into the `workspace` enum text on the other
-      tools so the model picks by intent on the first hop (the §16 cousin).
-      *(Deferred — the optional substep; `workspace_list` already carries it.)*
-- [x] Tests: config description wins over README; README-derived fallback parses
-      the first section only and respects the cap; policy-blocked README yields no
-      description; `wellKnownFiles` reflects exactly the present subset.
-- **Done when:** `workspace_list` returns a useful per-workspace `description` and
-  an accurate `wellKnownFiles` list, sourced config-first then README, with no root
-  disclosure and no content leak past policy.
-
-### 13. Ranged `file_read` — line spans
-Independent; can land any time after MVP (§8.3). A long file shouldn't force a
-whole-file read.
-- [x] `mcp/` + `file_read`: add optional `startLine` / `endLine` (1-based,
-      inclusive) to the args + JSON Schema; either omittable (open-ended).
-- [x] Implementation: open via `os.Root` as today, then return only the requested
-      line span. Apply the arg `maxBytes` to the **returned span** (the scan is
-      still bounded by the workspace `read.maxBytes`); preserve binary
-      detection/refusal (ranges are text-only). Count and return `totalLines`; echo
-      the resolved `startLine`/`endLine`; set `truncated` if `maxBytes` clipped the
-      span (or the file exceeded the workspace cap).
-- [x] Validate the range: `startLine`/`endLine` ≥ 1 and `startLine` ≤ `endLine`
-      when both given (else `INVALID_RANGE`); out-of-bounds clamps to the file
-      rather than erroring (an empty span past EOF returns empty content with the
-      true `totalLines`).
-- [x] Tests: full-file read unchanged when range omitted; `2-4` returns exactly
-      those lines; open-ended `startLine`-only and `endLine`-only; past-EOF clamps;
-      `maxBytes` clips a span → `truncated`; binary still flagged regardless of
-      range; `INVALID_RANGE` on bad bounds.
-- **Done when:** `file_read` can return an exact line span with correct
-      `totalLines`/`truncated`, behaves identically to today when no range is given,
-      and never bypasses policy, `os.Root`, or binary handling.
-
-### 14. Consolidate search into `tree_search` — path + content
-Merge `tree_find` + `tree_grep` into one `tree_search`. The find/grep split encoded two
-match vocabularies (glob/name vs literal-or-regex content), not two tools; one tool with
-a path glob and typed content predicates expresses both, without the selection tax of two
-lexical tools. (Structured frontmatter *query* — field-scoped predicates over YAML, a
-rollup — was considered and rejected: it serves database-like querying of a *known*
-schema, contradicting this server's orient-an-*unfamiliar*-tree premise. Out of scope per
-§3. We do detect the `---` fence — purely textually — to split matches and to hand back
-the raw frontmatter block; no parsing, no querying.) See §8.4 for the contract.
-- [x] Add `tree_search`: a `path` glob (boundary *and* name filter) plus a `where` list
-      of content predicates over the file body (AND-combined), each `{ text, fixedString?,
-      caseInsensitive?, wordBoundary? }`. Reuse the grrep walk / caps / ignore / policy /
-      binary handling verbatim; content predicates require `grep.enabled`, a pure
-      path-glob query does not (`where`-less = file enumeration). No YAML parser — fence
-      detection only.
-- [x] Return controls: `includeMatches` (default on) returns matched lines per file, with
-      hits inside a leading `---`…`---` fence split out as `metadataMatches` (vs body
-      `matches`); `includeMetadata` (default off) returns the raw, unparsed frontmatter
-      block as text in `metadata`. Both rely solely on fence detection. Result is a flat
-      `{ files: [{ path, matches?, metadataMatches?, metadata? }], truncated }`.
-- [x] Drop fuzzy name matching — an LLM globs-then-narrows, so ranking is wasted on it —
-      collapsing the old `query`/`name` into the `path` glob.
-- [x] Retire `tree_find` and `tree_grep` from `tools/list` and `tools/call` (two ways to
-      do one thing is its own orientation tax); update §8, the orientation eval (§16), and
-      any tests/docs that referenced them.
-- [x] Tests: path-glob selection incl. `where`-less enumeration; body predicate == old
-      grep semantics; multi-predicate AND; fence-split `metadataMatches` vs `matches`;
-      raw-text `includeMetadata`; no-op (no fence) on fence-less files; `includeMatches`
-      toggle; blocked / ignored / binary files excluded; caps + `truncated`; no root
-      disclosure.
-- **Done when:** a single `tree_search` locates files by path and body content, splits
-      frontmatter-fence matches from body matches, can hand back raw frontmatter text, and
-      `tree_find`/`tree_grep` are retired.
-
-### 15. Raw-binary delivery in `file_read`
-Hand raw bytes to claude.ai/ChatGPT and let *them* parse PDFs/images — the server
-extracts nothing (§8.3). The model can't reach the local bytes; that's the one
-thing only the server can do.
-- [x] `file_read`: for non-text/binary files, instead of refusing, return the raw
-      bytes as a base64 blob, with a detected MIME type:
-      `{ "path", "content", "encoding": "base64", "mimeType", "truncated" }`.
-      Keep the text path (and `binary: true` flag) for callers that want refusal.
-- [x] Enforce `read.maxBytes`, `os.Root`, and policy exactly as for text reads;
-      binary delivery never widens the sandbox or policy.
-- [x] Add an arg to opt into binary (`allowBinary: true`) so existing text
-      callers keep today's refuse-binary behavior by default.
-- [x] Tests: an image returns base64 + mimeType under the byte cap (extension type
-      + content-sniff fallback); oversize → `truncated`; policy/`os.Root` still gate
-      the path; default (no `allowBinary`) still flags without content.
-- **Done when:** `file_read` can deliver raw binary content for the platform to
-      parse, under the same byte/policy/sandbox limits, without server-side extraction.
 
 ### 16. Orientation & tool-selection eval (claude.ai)
 Validate that the orientation work (server `instructions`, the reworked tool
@@ -779,40 +568,101 @@ already exists (§10, §14); this is the *behavioral* eval the research prescrib
       first pass have landed. Pairs with the §10 / §14 live checks (folds into
       §12.10's verification rather than duplicating it).
 
-### 17. Auto-detect orientation files by convention (no config)
-Task §12.12 detects a **fixed three** — `README.md`, `AGENTS.md`, `CLAUDE.md`.
-Those are coding-agent conventions; this server's audience is research/notes/docs/
-papers, where the orientation file is often `index.md`, an `_index.md`, a table of
-contents, or `ABOUT`/`OVERVIEW`, and AGENTS/CLAUDE are usually absent. The fix is
-**not** a config knob (every user would hand-maintain a list that rots on rename);
-it's a broader **server-maintained recognizer** so a freshly-pointed workspace
-just works. Depends on §12.12 landing first.
-- [x] Registry (`workspace/`): replace the hardcoded three with a built-in,
-      curated stem set recognized **case-insensitively and extension-agnostically**
-      at the tree root only — `readme`, `index`, `_index`, `contents`, `toc`,
-      `overview`, `about`, `agents`, `claude`. Single root `ReadDir`, presence only
-      (metadata, not content), regular files only (symlinks/dirs skipped), each
-      candidate gated by the workspace's policy/`os.Root` exactly as in §12.12.
-- [x] Return the actual filenames found (so `README.rst` or `index.md` surface as
-      themselves), in a fixed priority order (then alphabetical); cap the list
-      (≤ 5, `maxWellKnownFiles`) so a noisy root can't flood `workspace_list`.
-- [x] Description fallback (§12.12) follows the same priority: derive the
-      `description` from the highest-priority detected orientation file's first
-      section (skipping binary candidates), not `README.md` specifically.
-- [x] `mcp/`: no schema change — `workspace_list`'s `wellKnownFiles` already
-      carries whatever subset is present (§12.12).
-- [x] Keep the recognizer a **closed, server-owned list** — deliberately not
-      user-extensible. If a real corpus needs a name we don't recognize, add it to
-      the built-in set (a one-line code change with a test), don't add a config
-      surface. Revisit only if that proves insufficient in practice.
-- [x] Docs: note in [docs/design.md §5.5] that orientation files are auto-detected
-      by convention (and *why* it's convention-over-config).
-- [x] Tests: each recognized stem/extension detected; case-insensitivity; non-root
-      matches ignored; policy-blocked names omitted; the cap holds; priority order
-      drives both the list and the description fallback.
-- **Done when:** a workspace points the model at its real orientation file(s)
-      without any per-workspace configuration, across common doc/notes conventions,
-      staying presence-only and policy-gated.
+### 17. Workspace-per-URL — select the workspace by route, drop the `workspace` param
+Move workspace selection from a tool argument to the HTTP route: one workspace per
+endpoint (`POST /mcp/<name>`, `GET /mcp/<name>`), so a claude.ai connector URL *is*
+a workspace. This collapses a whole column of accidental complexity — the
+`workspace` param, its config-driven enum, the `"default"` fallback, and
+`UNKNOWN_WORKSPACE` as a per-call domain error all disappear; "resolve workspace"
+stops being step (4) of the gate (§9, §10.1) and becomes routing done once at the
+HTTP layer. The registry stays; it's keyed by the path segment instead of an arg.
+Rationale and trade-offs are in [docs/design.md] (the single-workspace-at-a-time
+use case; register more endpoints for more trees).
+- [ ] Route the MCP endpoints under a workspace path segment in `buildHandler`
+      ([cmd/workspace-mcp/main.go]); map `<name>` → registry entry at dispatch, 404 (not
+      a domain error) on an unknown segment. Keep auth server-wide (one bearer/OAuth
+      for all paths; AuthZ stays per-workspace policy).
+- [ ] Drop the `workspace` property from every tool's input schema and handler
+      ([mcp/tools.go]); remove the enum-from-config plumbing and the
+      `UNKNOWN_WORKSPACE` path. The selected `*os.Root`/policy comes from the route.
+- [ ] **stdio has no URL** — add `-workspace <name>` (or require a single-workspace
+      config in stdio mode) so `serveStdio` ([cmd/workspace-mcp/main.go]) binds one
+      workspace. Document it.
+- [ ] **OAuth well-known under a path prefix** — verify how claude.ai resolves
+      `.well-known/oauth-protected-resource` / `oauth-authorization-server` (RFC 9728)
+      when the MCP endpoint sits under `/mcp/<name>`. One auth server for all paths is
+      the intent; confirm the protected-resource metadata still resolves. This is the
+      one place the refactor can bite ([mcp/oauth.go], [cmd/workspace-mcp/main.go]).
+- [ ] **Emit `WWW-Authenticate` on the 401** (RFC 9728, MCP 2025-11-25) — the bare
+      401 ([mcp/auth.go]) should carry `WWW-Authenticate: Bearer resource_metadata="…"`
+      pointing at this endpoint's `.well-known/oauth-protected-resource`. It's the
+      standard OAuth-discovery trigger, and with §17's per-endpoint URLs the header can
+      name the per-`<name>` resource explicitly rather than leaving the client to guess
+      the well-known path. Keep the body detail-free; the header is the only addition.
+- [ ] **Remove `workspace_list`** — with one workspace per endpoint, cross-workspace
+      discovery has no job. Its orientation payload (`description` + `wellKnownFiles`)
+      moves to the two tools-only homes below (§18-adjacent). Update
+      `test/workspace_test.go`, `test/mcp_test.go`, and the §5.3/§8.1 docs.
+- [ ] **Orientation home (1): `initialize` instructions.** The instructions string
+      is now workspace-specific (the URL picked the tree) — render that workspace's
+      `description` + detected `wellKnownFiles` (already computed in [mcp/registry.go])
+      into it, so the model is told what the tree is and where to start before any
+      reasoning ([mcp/server.go]).
+- [ ] **Orientation home (2): a no-arg orient tool.** Replace `workspace_list` with a
+      no-param tool (e.g. `workspace_info` / `orient`) returning *this* workspace's
+      `description` + `wellKnownFiles`. Tools are the surface Claude reliably calls, so
+      this is the dependable fallback if `instructions` is ignored (§5.5 still has that
+      unverified). Both homes are intentionally redundant per the §5.5 stance; worst
+      case orientation degrades to `tree_search` + `includeMetadata`.
+- **Done when:** a connector points at `/mcp/<name>`, no tool takes a `workspace`
+      arg, `workspace_list` is gone, the model is oriented via instructions and/or the
+      orient tool, stdio binds one workspace, and cross-workspace isolation (separate
+      `os.Root` per endpoint) still holds in tests.
+
+### 18. Spec conformance — MCP 2025-11-25
+Pick up the revision's relevant deltas. Most of the 2025-11-25 changes don't touch a
+read-only tools-only server (tasks, OIDC discovery — already done, incremental scope —
+N/A with one global scope, sampling/elicitation/roots — client features, icons —
+cosmetic). Two small ones are worth taking; a third lives in §17 (`WWW-Authenticate`).
+- [ ] **Negotiate `2025-11-25`.** Prepend it to `supportedProtocols` (newest-first)
+      ([mcp/server.go]); the existing fallback logic needs no other change.
+- [ ] **Origin-header validation → HTTP 403.** This revision makes it explicit:
+      Streamable HTTP servers must reject invalid `Origin` with 403 (DNS-rebinding
+      defense). Add an allowlisted-origins check ahead of `/mcp` in `buildHandler`
+      ([cmd/workspace-mcp/main.go]) — configurable, defaulting to the claude.ai origin;
+      most relevant on the ngrok-fronted path.
+- [ ] **Confirm input-validation errors stay tool-execution errors** (SEP-1303), not
+      JSON-RPC protocol errors — our `INVALID_ARGS` already returns via the `isError`
+      envelope (§13 / design §5.4); just verify the unmarshal path doesn't bubble a
+      protocol error instead, so the model can self-correct.
+- **Done when:** `initialize` negotiates `2025-11-25`, a request with a disallowed
+      `Origin` gets a 401-independent 403, and the arg-validation path is confirmed to
+      surface as a tool error.
+
+### 19. Prompts — optional `prompts/` dir → `prompts/list` + `prompts/get`
+Serve user-authored prompt templates from an optional per-workspace directory, via
+the MCP `prompts/*` methods. Purely additive: read-only, same `os.Root`/policy
+boundary, no security-model change. Composes with §17 — each endpoint = workspace =
+its own prompts dir. Unlike resources (rejected, [docs/design.md §7]), prompts are
+*meant* to be user-invoked (slash-command-style), so their needs-a-human property is
+exactly right; this is the on-brand "research/workflow" surface (§1).
+- [ ] Optional config field (e.g. `workspaces[].promptsDir`, workspace-relative);
+      absent → server advertises no `prompts` capability for that workspace.
+- [ ] Prompt file format: markdown with frontmatter (`name`, `description`,
+      `arguments: [{name, description, required}]`) + a `{{arg}}` template body. One
+      file = one prompt; decide the arg-substitution convention and document it.
+- [ ] Implement `prompts/list` (enumerate the dir) and `prompts/get` (read + fill
+      args) as new methods on the server ([mcp/server.go]); advertise the `prompts`
+      capability at `initialize` only when a `promptsDir` is set.
+- [ ] Read the dir through `os.Root`. Decide policy treatment: the dir is
+      author-curated content *meant* to be served, so lean **exempt from
+      `blockGlobs`** while still inside the sandbox (don't let a stray `*.md` block
+      glob hide prompts) — but document the choice.
+- [ ] Validate on the local `claude` CLI first (per the dev-loop), then confirm
+      claude.ai surfaces prompts before treating them as load-bearing.
+- **Done when:** a workspace with a `promptsDir` advertises `prompts`, `prompts/list`
+      enumerates the templates, `prompts/get` returns a filled prompt, and a workspace
+      without the dir is unaffected.
 
 ---
 
@@ -895,7 +745,7 @@ just works. Depends on §12.12 landing first.
 - Upstream the bearer `Processor` into `github.com/mnehpets/http`.
 - **Native stdio dispatch in `jsonrpc`.** The `-stdio` transport currently reuses
   the HTTP path by driving the handler in-process per message (a synthetic
-  `httptest` request/recorder round-trip in `cmd/shim`). It works and reuses all
+  `httptest` request/recorder round-trip in `cmd/workspace-mcp`). It works and reuses all
   tool gating verbatim, but routes stdio through an HTTP shim. Improve
   `github.com/mnehpets/http`'s `jsonrpc` to expose a transport-agnostic dispatch
   entry point (e.g. `HandleMessage(ctx, []byte) ([]byte, error)`, with `nil` for

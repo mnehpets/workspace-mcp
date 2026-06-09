@@ -28,7 +28,7 @@ claude.ai (web app)
 ## Build
 
 ```sh
-go build -o shim ./cmd/shim
+go build ./cmd/workspace-mcp
 ```
 
 Requires Go 1.26+ (the `go.mod` toolchain); the `os.Root` sandbox itself needs 1.24+.
@@ -38,20 +38,20 @@ Requires Go 1.26+ (the `go.mod` toolchain); the `os.Root` sandbox itself needs 1
 1. Copy the examples and edit:
 
    ```sh
-   cp config.example.yaml config.yaml
-   cp .env.example .env
+   cp example/config.example.yaml config.yaml
+   cp example/secrets.example.env secrets.env
    ```
 
 2. Edit `config.yaml`: set each workspace's `root` (absolute path), and tune the
    per-workspace `policy.allowGlobs` / `policy.blockGlobs`, `read.maxBytes`, and
    `grep` settings. There must be a workspace named `default` (it is the fallback
-   for the `workspace` tool parameter). See `config.example.yaml` for the full
+   for the `workspace` tool parameter). See `example/config.example.yaml` for the full
    shape.
 
-3. Put the bearer token in `.env` (never in `config.yaml`). Generate a strong one:
+3. Put the bearer token in `secrets.env` (never in `config.yaml`). Generate a strong one:
 
    ```sh
-   echo "SHIM_BEARER_TOKEN=$(openssl rand -hex 32)" > .env
+   echo "SHIM_BEARER_TOKEN=$(openssl rand -hex 32)" > secrets.env
    ```
 
    The config references it by name:
@@ -62,7 +62,7 @@ Requires Go 1.26+ (the `go.mod` toolchain); the `os.Root` sandbox itself needs 1
        env: SHIM_BEARER_TOKEN
    ```
 
-   Secrets resolve from the `.env` file overlaid by the OS environment (the OS
+   Secrets resolve from the `secrets.env` file overlaid by the OS environment (the OS
    environment **wins**), so a deployment can inject `SHIM_BEARER_TOKEN` without a
    file. A missing/empty referenced variable is a startup error.
 
@@ -77,12 +77,12 @@ Requires Go 1.26+ (the `go.mod` toolchain); the `os.Root` sandbox itself needs 1
        - env: SHIM_BEARER_TOKEN_NEXT   # next — switch claude.ai over, then drop this
    ```
 
-`config.yaml` and `.env` are gitignored. Only the `*.example.*` files are committed.
+`config.yaml` and `secrets.env` are gitignored. Only the `*.example.*` files are committed.
 
 ## Run
 
 ```sh
-./shim -config config.yaml -env .env
+./shim -config config.yaml -env secrets.env
 # health check (no auth):
 curl http://127.0.0.1:3850/healthz   # -> {"ok":true}
 ```
@@ -122,12 +122,12 @@ ngrok path for it; stdio is for local clients and testing.
 ### With the Claude CLI (Claude Code)
 
 A ready-to-use stdio registration lives in `.mcp.json` (gitignored — it holds
-absolute host paths), pointing at a prebuilt `./shim` and `config.local.yaml`:
+absolute host paths), pointing at a prebuilt `./workspace-mcp` and `config.local.yaml`:
 
 ```sh
-go build -o shim ./cmd/shim          # .mcp.json references the absolute binary path
-claude mcp list                      # shows: workspace-mcp ... ⏸ Pending approval
-claude                               # run once, approve the project MCP server
+go build ./cmd/workspace-mcp  # .mcp.json references the absolute binary path
+claude mcp list               # shows: workspace-mcp ... ⏸ Pending approval
+claude                        # run once, approve the project MCP server
 ```
 
 `config.local.yaml` is a host-specific test config (also gitignored) with your
@@ -146,21 +146,52 @@ claude mcp add-json workspace-mcp '{
 
 ## Expose with ngrok
 
-```sh
-cp ngrok.example.yml ngrok.yml      # edit authtoken + reserved domain + port
-ngrok start --config ngrok.yml workspace-mcp
+The server has **built-in ngrok** — no external process or `ngrok.yml` needed.
+Enable it in `config.yaml`:
+
+```yaml
+server:
+  ngrok:
+    enabled: true
+    authtoken:
+      env: NGROK_AUTHTOKEN          # in secrets.env
+    # domain: my-reserved-host.ngrok.app   # optional: pin a stable domain
 ```
 
-Reserve a domain in the ngrok dashboard so the URL is stable, and enable **edge
-auth** (basic auth / OAuth / IP allow-list) — do not rely on the bearer token
-alone. ngrok must expose **only this server**.
+Add `NGROK_AUTHTOKEN` to `secrets.env` (find yours in the ngrok dashboard). The
+public URL is logged at startup:
+
+```
+INFO starting via ngrok url=https://xxxx.ngrok.app workspaces=1
+```
+
+Reserve a domain in the ngrok dashboard so the URL is stable across restarts.
+With `server.ngrok.enabled: true` the `server.host`/`server.port` fields are
+unused — the server does not bind a local TCP port.
 
 ## Add to claude.ai
 
-In claude.ai → **Settings → Connectors → Add custom connector**:
+In claude.ai → **Settings → Connectors → Add custom connector**.
 
-- **URL:** `https://<your-reserved-subdomain>.ngrok.app/mcp`
-- **Authentication:** bearer token — the value of `SHIM_BEARER_TOKEN`.
+The connector URL is your tunnel domain with the `/mcp` path:
+
+- **URL:** `https://<your-domain>/mcp` (e.g. `https://xxxx.ngrok.app/mcp`)
+
+**With OAuth** (the only auth type claude.ai currently supports):
+
+Enable `auth.oauth` in `config.yaml` (see `example/config.example.yaml`) and add
+`OAUTH_CLIENT_SECRET` to `secrets.env`. Then supply:
+
+- **Client ID:** the value you set for `auth.oauth.clientID`
+- **Client Secret:** the value of `OAUTH_CLIENT_SECRET`
+
+The authorization and token URLs are advertised by the server's
+`.well-known` discovery endpoints, so claude.ai picks them up automatically —
+you don't enter them by hand. (This is standard OAuth 2.0 metadata discovery;
+other MCP clients that follow the spec should behave the same way.)
+
+When claude.ai initiates the flow you'll see an Authorize page — one click grants
+access. Access tokens are valid for 1 hour and automatically re-issued.
 
 Then start a chat and ask Claude to use the connector, e.g.:
 
@@ -195,8 +226,8 @@ reasoning is in [docs/design.md §2](docs/design.md).
 
 ## Shutdown
 
-Stop the `shim` process (Ctrl-C) and stop the ngrok agent. With the tunnel down,
-the server is unreachable from claude.ai.
+Stop the `shim` process (Ctrl-C). With built-in ngrok the tunnel tears down
+automatically — no separate agent to stop.
 
 ## Layout
 
