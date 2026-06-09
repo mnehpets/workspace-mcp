@@ -46,11 +46,12 @@ absent):
 
 ### Non-goals (hard)
 
-No remote shell or command runner; no arbitrary write (writes are a deliberately
-deferred, flag-gated task); no Git automation (commit/push/branch/rebase); no
-second LLM/agent loop; no LSP/symbol index; no multi-user SaaS; **no external
-binaries at all** (single self-contained Go binary). Single-user local developer
-tool.
+No remote shell or command runner; no Git automation (commit/push/branch/rebase);
+no file delete/move/rename; no second LLM/agent loop; no LSP/symbol index; no
+multi-user SaaS; **no external binaries at all** (single self-contained Go binary).
+Single-user local developer tool. Writing **is** supported, but only as an
+explicit per-workspace opt-in (`write.enabled`, default off) over three exact-byte
+ops — see §5.3; it is never the default posture and never a diff/patch engine.
 
 ---
 
@@ -74,8 +75,12 @@ checks as the boundary — that is precisely what `os.Root` is for.
 
 ### 2.2 Where `os.Root` is load-bearing — and where it isn't
 
-`os.Root` is essential for **model-supplied paths** (`file_read`, the deferred
-patch tool): the path comes straight from the model and may be hostile.
+`os.Root` is essential for **model-supplied paths** (`file_read` and the write ops
+`file_create`/`file_overwrite`/`file_replace`): the path comes straight from the
+model and may be hostile. The write ops resolve through the *same* `os.Root` and
+clear the *same* `policy.CheckFile` a read does (block wins), so a write can never
+escape containment or reach a blocked path — the writable surface is exactly the
+readable one.
 
 Two classes of helper deliberately read **outside** `os.Root`, which is safe
 because they never serve file *content* to the model — they produce metadata only:
@@ -93,9 +98,12 @@ freely.**
 
 ### 2.3 Read-only by construction, and auth
 
-- **Read-only is a build property, not a config toggle.** No code path writes
-  (until the deferred patch task lands behind a flag). The `*os.Root` is used only
-  for read methods.
+- **Read-only is the default posture.** A workspace writes only when its config
+  sets `write.enabled: true` (§5.3); with it off the three write tools are absent
+  from `tools/list` and any forced call returns `READ_ONLY`, so the `*os.Root` is
+  used only for read methods. Where writes are granted they still ride that
+  workspace's `*os.Root` + `policy.CheckFile`, so read-only remains the default
+  build posture, not just a config value.
 - **Auth is layered:** a server-wide bearer token (constant-time compared, ≥ 32
   bytes, sourced from `secrets.env`/OS env — never from `config.yaml`), and/or an
   OAuth 2.0 authorization code flow (for clients such as claude.ai that only support
@@ -165,6 +173,10 @@ mcp/                 Everything except the vendored search core and git layer.
                      worker pool, match cap.
   search.go          tree_search engine: path-glob boundary + AND-combined where
                      predicates + frontmatter-fence splitting. Drives walk.go.
+  write.go           The opt-in write surface: file_create/file_overwrite/
+                     file_replace. Shared writeGate (write.enabled → Clean →
+                     policy.CheckFile), base_sha256 optimistic-concurrency check,
+                     exact-byte match/replace. No diff parser, no git automation.
   log.go             Redacting slog logger. ToolEvent carries the per-call record;
                      never logs content or the token.
   server.go          The protocol surface and the gate: initialize / tools/list /
@@ -299,7 +311,7 @@ when only one is configured, else named via `-workspace` ([cmd/workspace-mcp/mai
 
 | Method | Behavior |
 |---|---|
-| `initialize` | Negotiate protocol version (supported, newest-first: `2025-06-18`, `2025-03-26`, `2024-11-05`; unknown → our newest). Advertise `{ capabilities: { tools: {} } }` + serverInfo `{ name: "workspace-mcp", version }` + an `instructions` string (§5.5). ([mcp/server.go:67]) |
+| `initialize` | Negotiate protocol version (supported, newest-first: `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`; unknown → our newest). Advertise `{ capabilities: { tools: {} } }` + serverInfo `{ name: "workspace-mcp", version }` + an `instructions` string (§5.5). ([mcp/server.go:67]) |
 | `notifications/initialized` | Accept; no response. |
 | `ping` | Respond with `{}`. |
 | `tools/list` | Return the catalog (§5.3). The workspace is fixed by the endpoint URL (§5.0), so no tool takes a `workspace` param. ([mcp/server.go]) |
@@ -320,11 +332,13 @@ is JSON-serialized into a single text block ([mcp/server.go:245]):
 
 ### 5.3 Tools
 
-Four tools today ([mcp/tools.go]). **No tool takes a `workspace` argument** — the
-workspace is fixed by the endpoint URL (§5.0). All `path` args are
-workspace-relative and resolve through that workspace's `os.Root`. Schemas use
-`additionalProperties: false`. Every tool also carries read-only MCP
-**annotations** (§5.5).
+Four read tools always ([mcp/tools.go]), plus three write tools advertised **only**
+when the workspace sets `write.enabled` (§5.3 write surface). **No tool takes a
+`workspace` argument** — the workspace is fixed by the endpoint URL (§5.0). All
+`path` args are workspace-relative and resolve through that workspace's `os.Root`.
+Schemas use `additionalProperties: false`. The read tools carry read-only MCP
+**annotations** (§5.5); the write tools carry `readOnlyHint: false` (and
+`destructiveHint: true` for overwrite/replace, false for create).
 
 > Notation below: `in` = input properties (★ = required), `out` = the structured
 > JSON inside the result's text block.
@@ -434,9 +448,57 @@ Read-only status, git-repo workspaces only.
 - go-git `Worktree().Status()` + `repo.Head()`; non-git workspace → `NOT_A_GIT_REPO`.
   No mutation, no `git` binary. ([mcp/tools.go:438])
 
+#### Write surface — `file_create` / `file_overwrite` / `file_replace` (opt-in)
+
+Three explicit byte-level ops mirroring the Claude Code edit tools — **not** a diff
+parser, no git automation. Present in `tools/list` (and the `instructions` prose
+flips to mention editing) **only** when the workspace sets `write.enabled: true`;
+otherwise they are absent and any forced call returns `READ_ONLY`. Each runs the
+shared `writeGate` (`write.enabled` → `Clean` → `policy.CheckFile`), so a write
+target clears the *same* allow/block a read does, through the same `os.Root`. Every
+op writes **raw bytes with zero normalization** (no whitespace trim, no line-ending
+rewrite) — silent normalization would turn a safe rejection into a wrong-place
+edit. The human reviews `git diff` and commits out of band; the server never
+commits, pushes, deletes, moves, or renames. ([mcp/write.go])
+
+#### `file_create`
+- **in** `path` ★, `contents` ★
+- **out** `{ "path": string, "bytesWritten": int, "sha256": string }`
+- New file only (`O_CREATE|O_EXCL` through `os.Root`); an existing path is never
+  clobbered → `PATH_EXISTS` ("use file_overwrite"). Missing parent dirs are
+  auto-created inside the sandbox. No `base_sha256`/`dry_run` — a new path has
+  nothing to race.
+
+#### `file_overwrite`
+- **in** `path` ★, `contents` ★, `base_sha256`?, `dry_run`?
+- **out** `{ "path": string, "bytesWritten": int, "sha256": string, "dryRun"?: bool }`
+- Full-file replace for files changing substantially. Must already exist
+  (`O_TRUNC|O_WRONLY`, no `O_CREATE`) → absent path is `NOT_FOUND` ("use
+  file_create"), so a typo can't silently create a stray file.
+
+#### `file_replace`
+- **in** `path` ★, `old_str` ★, `new_str` ★, `expected_replacements`?=1,
+  `base_sha256`?, `dry_run`?
+- **out** `{ "path": string, "replacements": int, "sha256": string, "dryRun"?: bool }`
+- Matches `old_str` against raw file bytes and replaces with `new_str` (an empty
+  `new_str` is the delete-text path). Rejects unless the occurrence count equals
+  `expected_replacements` exactly → `MATCH_COUNT_MISMATCH` echoing the actual count
+  (so the model knows whether to lengthen the anchor or bump the parameter).
+  Default `1` is the uniqueness guarantee; the parameter exists for the deliberate
+  "change all N" case. Empty `old_str` → `INVALID_ARGS`. The whole file is read
+  bounded by `read.maxBytes` (larger → `FILE_TOO_LARGE`, never a partial replace).
+
+**Cross-cutting guards.** `base_sha256` (optional hex sha256 of the file's current
+full bytes — the *same* hash `tree_search`'s `includeMetadata` returns) is the
+optimistic-concurrency guard against the read-then-write race (the tree syncs from
+GitHub out of band); on mismatch → `BASE_SHA_MISMATCH` returning the actual hash.
+`dry_run` on overwrite/replace returns the count + resulting hash without writing,
+so the model can confirm an `old_str` resolved uniquely before committing. Each
+change audits a content hash (§2.3).
+
 **Hard exclusions** — never in `tools/list`, always rejected in `tools/call`: any
-write/create/delete/move/rename (until the deferred patch task), any shell/command
-execution, any Git mutation.
+file delete/move/rename, any shell/command execution, any Git mutation. The three
+write ops above are the *only* mutation path, and only on a workspace that opts in.
 
 ### 5.4 Error spec
 
@@ -448,9 +510,14 @@ Domain failures return `isError: true` with `{ code, message, reason? }`
 | `NOT_A_GIT_REPO` | git tool on a non-git workspace | — |
 | `GREP_DISABLED` | `tree_search` with `where` predicates where `grep.enabled` is false | — |
 | `POLICY_DENIED` | path blocked or outside the sandbox | `absolute_path`, `traversal`, `outside_root`, `blocked_glob`, dotfile reason |
-| `NOT_FOUND` | missing path / path is a directory (file_read) | — |
+| `NOT_FOUND` | missing path / path is a directory (file_read, file_overwrite, file_replace) | — |
 | `INVALID_PATTERN` | bad regex (`fixedString:false`); no walk performed | — |
-| `INVALID_ARGS` | arguments fail to unmarshal | — |
+| `INVALID_ARGS` | arguments fail to unmarshal; empty `old_str` (file_replace); `expected_replacements` < 1 | — |
+| `READ_ONLY` | a write tool called on a workspace without `write.enabled` (also absent from `tools/list`) | — |
+| `PATH_EXISTS` | `file_create` onto an existing path ("use file_overwrite") | — |
+| `MATCH_COUNT_MISMATCH` | `file_replace` occurrence count ≠ `expected_replacements`; message echoes the actual count; no write | — |
+| `BASE_SHA_MISMATCH` | supplied `base_sha256` ≠ the file's current hash (changed since read); message returns the actual hash; no write | — |
+| `FILE_TOO_LARGE` | write target exceeds `read.maxBytes` (can't read-modify-write safely); no partial write | — |
 | `INTERNAL` | unexpected server error (no detail leaked) | — |
 
 Three failures are *not* in this envelope: an **unknown tool name** is a JSON-RPC
@@ -541,12 +608,18 @@ treat a partial result as complete.
 
 ## 7. Deferred & future (pointers, not commitments)
 
-The payoff of going standalone is a **`tree_patch`** write tool done right —
-flag-gated, default off, never started before the read surface is solid: parse a
-unified/git diff with `go-gitdiff`, require context to match (reject on drift),
-write **through `os.Root`** restricted to `allowGlobs`, audit a content hash, never
-commit/push. The research-workflow cousin is "capture results back" (append a
-finding to an inbox note) — also a write, same umbrella.
+The payoff of going standalone — a flag-gated write surface — has **landed**, but
+reshaped from the originally-planned single unified-diff `tree_patch` into three
+explicit byte-level ops (`file_create`/`file_overwrite`/`file_replace`, §5.3): no
+`go-gitdiff`, no diff parser at all, just deterministic exact-byte edits with
+uniqueness (`expected_replacements`) and optimistic-concurrency (`base_sha256`)
+guards, through `os.Root` + the same policy a read clears, auditing a content hash,
+never committing/pushing. What remains deferred here: a **batch/envelope** op (the
+single-call view→edit→view loop is the honest pattern for now), transaction/commit
+verbs (the deferred git-workflow design; `dry_run` + `base_sha256` are its hooks),
+and the research-workflow cousin "capture results back" (append a finding to an
+inbox note). Move/rename/delete stay out — delete is the highest blast radius; add
+only on real need.
 
 Other candidates, each measured against the §1 thin-pipe rule: read-only `git_log`
 (whole-workspace + per-file), `git_blame`, `git_show`, `git_diff`; an

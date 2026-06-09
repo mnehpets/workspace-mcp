@@ -44,8 +44,9 @@ else reaches the filesystem.
 - **Hard sandbox via `os.Root`.** Containment is enforced by the OS-level root
   (one per workspace), not by string munging. Path policy (globs) sits *on top*
   as allow/deny, not as the security boundary.
-- **Writes are a later task** using deterministic diff application. Off by
-  default; designed, not built, in MVP.
+- **Writes are a later task** (task 11 / §8.7): three exact-byte ops
+  (create/overwrite/replace), not diff application. Per-workspace, default off;
+  designed, not built, in MVP.
 
 ---
 
@@ -93,8 +94,9 @@ This is the security core, so be precise about it:
 
 ### 5.1 Where `os.Root` is load-bearing — and where it isn't
 
-`os.Root` is essential for **model-supplied paths**: `file_read` and the deferred
-`tree_patch` take a path straight from the model, which may be `../../etc/passwd`
+`os.Root` is essential for **model-supplied paths**: `file_read` and the write ops
+(`file_create`/`file_overwrite`/`file_replace`, §8.7) take a path straight from the
+model, which may be `../../etc/passwd`
 or a symlink. Those *must* resolve through the selected workspace's `os.Root`,
 full stop.
 
@@ -145,10 +147,11 @@ Other deps:
   for `git_status` and the index/worktree for tracked-file enumeration. No `git`
   binary needed. Metadata only — never the content path. (`.gitignore` matching
   lives in grrep's `IgnoreSet`, below, to keep one ignore engine.)
-- **`github.com/bluekeyes/go-gitdiff`** — parse & apply unified/git diffs for the
-  deferred `tree_patch` task (`gitdiff.Parse` → `gitdiff.Apply`). Deterministic
-  context-checked application; pulled in only with that task.
-- stdlib `os` (`os.Root`), `io/fs`, `bytes`, `regexp`, `log/slog` (redacting audit
+- *No diff-parsing dependency.* The write surface (§8.7 / task 11) is exact-byte
+  ops — `bytes.Count`/`bytes.ReplaceAll` over raw file content plus `crypto/sha256`
+  for the optimistic-concurrency check — so `go-gitdiff` (or any unified-diff parser)
+  is **not** pulled in.
+- stdlib `os` (`os.Root`), `io/fs`, `bytes`, `regexp`, `crypto/sha256`, `log/slog` (redacting audit
   log); `gopkg.in/yaml.v3` for the YAML config and `github.com/joho/godotenv` for
   the `.env` secrets file (§7.1).
 
@@ -288,7 +291,7 @@ unknown keys are an error, not a silent typo.
 
 ---
 
-## 8. Exposed tool surface (read-only)
+## 8. Exposed tool surface (read-only by default; writes opt-in)
 
 Tool families: **`workspace_*`** (discovery), **`tree_*`** (directory/tree-wide),
 **`file_*`** (single file), **`git_*`** (git-repo only — else `NOT_A_GIT_REPO`).
@@ -338,8 +341,8 @@ Returns a flat file list; the caller chooses whether to hydrate matched lines pe
 `{ "workspace": "default", "path": "docs/**/*.md",
    "where": [ { "text": "ASC workflow", "fixedString": true } ],
    "includeMatches": true }`
-→ `{ "files": [{ "path", "matches"?, "metadataMatches"?, "metadata"? }], "truncated" }`
-(`matches`/`metadataMatches` are each a list of `{ "line","text" }`; `metadata` is a string).
+→ `{ "files": [{ "path", "matches"?, "metadataMatches"?, "metadata"?, "sha256"? }], "truncated" }`
+(`matches`/`metadataMatches` are each a list of `{ "line","text" }`; `metadata` and `sha256` are strings).
 - **`path`** — a glob selecting candidate files (boundary *and* name filter in one;
   e.g. `docs/**/*.{md,txt}`). Omit for the whole tree. Fuzzy name matching was
   considered and dropped: an LLM globs broad then narrows by inspecting results, so
@@ -359,7 +362,11 @@ Returns a flat file list; the caller chooses whether to hydrate matched lines pe
 - **`includeMetadata`** (default off) — attach each file's frontmatter block as **raw,
   unparsed text** (the bytes between the leading fences) in `metadata`. The caller parses
   it if it cares; the server hands over bytes, never a typed/queryable schema. No-op on
-  files without a fence.
+  files without a fence. **Also attaches `sha256`** — the hex SHA-256 of each returned
+  file's full bytes (the same hash `base_sha256` checks, §8.7.4) — so a discovery pass can
+  capture the hash to pass straight into a subsequent `file_replace`/`file_overwrite` with
+  no extra read. Gated by `includeMetadata` because hashing every match has a real cost;
+  it applies to every returned file, fence or not. See task §12.11 (write surface).
 - Field-scoped *predicates* (matching within a named field) stay out of scope — see §3.
   The server finds the fence; it never parses or queries the YAML inside it.
 Backed by the vendored grrep core (§6): `fastwalk` traversal filtered by `IgnoreSet` +
@@ -374,9 +381,81 @@ branch (`repo.Head()`) → `{ "branch", "files": [{ "path","status" }] }`. On a
 non-git workspace: `NOT_A_GIT_REPO`. No mutation, no `git` binary.
 
 ### 8.6 Hard exclusions
-Never exposed, always rejected: any write/create/delete/move/rename (until the
-deferred `tree_patch` task), any shell/command execution, any Git mutation.
-Absent from `tools/list` and rejected in `tools/call`.
+Never exposed, always rejected: any shell/command execution, any Git mutation
+(commit/push/branch/reset), and any file delete/move/rename. The opt-in write ops
+of §8.7 (create/overwrite/replace) are the *only* mutation path, and only when a
+workspace sets `write.enabled`; everything else mutating is absent from
+`tools/list` and rejected in `tools/call`.
+
+### 8.7 Write surface (opt-in, default off) — task 11
+
+The deferred write task, reshaped from a single unified-diff `tree_patch` into
+**three explicit byte-level ops** mirroring the Claude Code edit tools. The editing
+loop needs all three — replace a unique span, overwrite a substantially-changed
+file, create a new file — and a surface missing any one collapses back to
+read-only. No diff parser, no git automation: deterministic edits with uniqueness
+and optimistic-concurrency guards. The human reviews `git diff` and commits out of
+band (§3 still forbids commit/push/branch).
+
+**Per-workspace, opt-in, default off.** A workspace writes only when its config sets
+`write.enabled: true`. With it off, the three tools are absent from `tools/list` and
+any forced call returns `READ_ONLY`. Read-only stays the default posture of the
+build (§10.3); writing is an explicit per-tree grant.
+
+**Writable surface == readable surface.** A write target passes the *same*
+`policy.CheckFile` (block wins, dotfile backstop, allowlist) a read does — no
+separate write-allowlist to drift. Containment is the same per-workspace `os.Root`;
+`Clean` rejects absolute/`..` first. So nothing writable is unreadable and nothing
+blocked (`.env`, keys, `.git/**`) is writable.
+
+#### 8.7.1 `file_create`
+`{ "path": "docs/new/05.md", "contents": "…" }` → `{ "path", "bytesWritten", "sha256" }`.
+New file only — `O_CREATE|O_EXCL` through `os.Root`; an existing path is **never**
+clobbered (`PATH_EXISTS` → use `file_overwrite`). Missing parent dirs are
+auto-created (`MkdirAll`, inside the sandbox). No `base_sha256`/`dry_run` — a new
+path has nothing to race.
+
+#### 8.7.2 `file_overwrite`
+`{ "path", "contents", "base_sha256"?, "dry_run"? }` → `{ "path", "bytesWritten", "sha256" }`.
+Full-file replace for files changing substantially (quoting `old_str` would be
+silly). Fails if the path is absent (`NOT_FOUND` → use `file_create`), so a typo
+can't silently create a stray file. `O_TRUNC|O_WRONLY`, no `O_CREATE`.
+
+#### 8.7.3 `file_replace`
+`{ "path", "old_str", "new_str", "expected_replacements"?=1, "base_sha256"?, "dry_run"? }`
+→ `{ "path", "replacements", "sha256" }`.
+Matches `old_str` against raw file bytes, replaces with `new_str`. The server counts
+occurrences and rejects unless the count equals `expected_replacements` exactly
+(`MATCH_COUNT_MISMATCH`, echoing the actual count, so the model knows whether to
+lengthen the anchor or bump the parameter). Default `1` is the uniqueness guarantee
+that makes the op safe; the parameter exists for the deliberate "change all N" case.
+Empty `old_str` → `INVALID_ARGS`. The whole file is read (bounded by
+`read.maxBytes`; larger → `FILE_TOO_LARGE`, never a partial replace).
+
+#### 8.7.4 Cross-cutting behavior (this is where the reliability lives)
+- **Exact-match, zero normalization.** No whitespace trim, no line-ending rewrite,
+  no trailing-newline strip — match and write raw bytes. Silent normalization turns
+  a safe rejection into a wrong-place edit. (Workspace convention is `\n`.)
+- **`base_sha256` (optional, hex sha256 of the file's current full bytes), supported
+  day one.** When supplied, the server rejects on mismatch (`BASE_SHA_MISMATCH`,
+  returning the actual hash) — the only guard against the read-then-write race, which
+  is real here because the tree syncs from GitHub out of band. Optional because a
+  fresh hash isn't always in hand, but built now, not retrofitted.
+- **`dry_run` on replace/overwrite.** Returns match count + before/after hashes
+  without writing — lets the model confirm an `old_str` resolved uniquely before
+  committing.
+- **Structured, specific rejections** are part of the contract — each maps to a
+  distinct next move: `MATCH_COUNT_MISMATCH` (with count), `BASE_SHA_MISMATCH`,
+  `NOT_FOUND`, `PATH_EXISTS`, `POLICY_DENIED` (`outside_root`/`traversal`/
+  `absolute_path`/`blocked_glob`), `READ_ONLY` (writes disabled), `FILE_TOO_LARGE`.
+- **Audit** a content hash per change (§10.5). Never commit or push.
+
+#### 8.7.5 Deliberately out of scope (now)
+No batch/envelope op (single calls in the view→edit→view loop is the honest
+pattern). No transaction/commit verbs (that's the deferred git-workflow design;
+`dry_run` + `base_sha256` are the hooks it will build on). No move/rename/delete
+(not needed for the editing loop; delete is the highest blast radius — add only on
+real need).
 
 ---
 
@@ -429,10 +508,14 @@ Reject model-supplied absolute paths and any `..` before resolution; then let
 `os.Root` enforce the rest. Don't hand-roll traversal checks as the boundary —
 that's what `os.Root` is for.
 
-### 10.3 Read-only by construction
-No code path writes (until the deferred patch task lands, behind a flag). The
-`*os.Root` is used only
-for read methods in MVP. Read-only is a property of the build, not just config.
+### 10.3 Read-only by default; writes are an explicit per-workspace grant
+A workspace is read-only unless its config sets `write.enabled: true` (§8.7). With
+it off, no code path writes: the three write tools are absent from `tools/list` and
+a forced call returns `READ_ONLY`, and the `*os.Root` is used only for read methods.
+Where writes are granted, every write still resolves through that workspace's
+`*os.Root` and clears the *same* `policy.CheckFile` a read does (block wins), so a
+write can never escape containment or reach a blocked path. Read-only remains the
+default posture of the build, not just a config value.
 
 ### 10.4 Auth, layered
 - **Server bearer token**, constant-time compared, ≥ 32 random bytes; 401 on
@@ -515,20 +598,50 @@ buying anything.
 
 ## 12. Task list
 
-### 11. Deferred — `tree_patch` (writes, done right) · flag, default off
-The payoff of going standalone. Do **not** start until sections 1–10 are green.
-- [ ] Input: a unified/git diff (or structured old/new-string hunks).
-- [ ] Parse with `go-gitdiff`; apply against current content and **require context
-      to match** — reject on drift (model re-reads and retries).
-- [ ] Write **through `os.Root`** (`Root.Create`/`OpenFile`); restrict to
-      `policy.allowGlobs`, honor `policy.blockGlobs`; validate each file before any
-      write; optional all-or-nothing across a multi-file patch.
-- [ ] Audit a content hash per change. Never commit or push — the human reviews
-      `git diff`.
-- [ ] Failure: context mismatch → `PATCH_CONFLICT` ("re-read and retry"); no
-      partial write.
-- **Done when:** patches apply deterministically and reversibly via Git; conflicts
-  and out-of-policy/escape targets are refused. Deterministic, no second LLM.
+### 11. Write surface — `file_create` / `file_overwrite` / `file_replace` · per-workspace, default off
+The payoff of going standalone. Reshaped from a single unified-diff `tree_patch`
+into three explicit byte-level ops (§8.7) — no diff parser, no `go-gitdiff`.
+Do **not** start until sections 1–10 are green. Full design in §8.7; this is the
+build checklist.
+- [x] **Config + gate.** Add `workspaces[].write.enabled` (default false) to the
+      typed config (`mcp/config.go`) and carry it onto `Workspace` (`mcp/registry.go`).
+      A shared `writeGate(path)` checks `write.enabled` (else `READ_ONLY`), then
+      `Clean` + `policy.CheckFile` — the *same* allow/block a read uses, so the
+      writable surface equals the readable one.
+- [x] **Sandbox primitives** (`mcp/root.go`): `CreateNew` (`MkdirAll` parent then
+      `O_CREATE|O_EXCL`), `WriteExisting` (`O_TRUNC|O_WRONLY`, no `O_CREATE`) — both
+      through the workspace's `*os.Root`.
+- [x] **`file_create`** — new file only; `PATH_EXISTS` on collision; auto-creates
+      missing parent dirs; no `base_sha256`/`dry_run`.
+- [x] **`file_overwrite`** — full-file replace; `NOT_FOUND` if absent; optional
+      `base_sha256` and `dry_run`.
+- [x] **`file_replace`** — exact-byte `old_str`→`new_str`; reject unless occurrence
+      count == `expected_replacements` (default 1) with `MATCH_COUNT_MISMATCH`
+      echoing the actual count; empty `old_str` → `INVALID_ARGS`; whole file read
+      bounded by `read.maxBytes` (`FILE_TOO_LARGE` past it); optional `base_sha256`
+      and `dry_run`.
+- [x] **Cross-cutting:** zero normalization (raw bytes); `base_sha256` (hex sha256 of
+      current bytes) rejects on drift with `BASE_SHA_MISMATCH`; `dry_run` returns
+      counts/hashes without writing; audit a content hash per change. Never commit or
+      push — the human reviews `git diff`.
+- [x] **Surface gating:** the three tools appear in `tools/list` and the instructions
+      prose flip to "writes allowed" *only* when `write.enabled`; write tools carry
+      `readOnlyHint:false` (and `destructiveHint:true` for overwrite/replace).
+- [x] **Tests** (`test/write_test.go`): each op's success + each structured rejection,
+      no-normalization (trailing newline/CRLF preserved), cross-workspace isolation,
+      and tools/list visibility on/off.
+- [x] **`tree_search` exposes `sha256` (companion).** When `includeMetadata` is set,
+      attach each returned file's hex SHA-256 (`crypto/sha256` over its full bytes,
+      read through `os.Root`) as a `sha256` field (§8.4) — the *same* hash
+      `base_sha256` checks. Lets a discovery pass capture hashes to feed straight into
+      `file_replace`/`file_overwrite` without a separate `file_read`. Gated by
+      `includeMetadata` because hashing every match has real cost; applies to every
+      returned file (fence or not). Extend `mcp/search.go` (per-file hash during the
+      walk) and `test/search_test.go`. Independent of `write.enabled` — it is a read.
+- **Done when:** the three ops apply deterministically through `os.Root`+policy,
+  every structured rejection is returned with its distinct code, a write-disabled
+  workspace exposes no write tool, and changes are reviewable/reversible via Git.
+  Deterministic, no second LLM.
 
 ### 16. Orientation & tool-selection eval (claude.ai)
 Validate that the orientation work (server `instructions`, the reworked tool
@@ -680,6 +793,101 @@ exactly right; this is the on-brand "research/workflow" surface (§1).
       enumerates the templates, `prompts/get` returns a filled prompt, and a workspace
       without the dir is unaffected.
 
+### 20. End-to-end tool-use eval (live `claude`)
+The Go suite proves each op and rejection deterministically, but it can't tell us
+whether a *model*, handed only the tool descriptions, drives the surface correctly:
+picks the right tool, supplies the guardrail params, and recovers from a structured
+rejection rather than thrashing. This is the behavioral companion to §16's
+orientation eval, extended to the read/search/write edges — author a fixed,
+re-runnable set of natural-language scenarios, feed them to a live `claude` session
+against a writable workspace (dev loop: local CLI first, claude.ai as later
+confirmation — see [[dev-loop-local-cli]]), and record whether the model does the
+right thing. Keep the set in the repo (e.g. `test/eval/prompts.md`, alongside §16's
+orientation prompts); record pass/fail + notes per scenario, and feed failures back
+into the tool descriptions / `instructions` wording (treat prose as prompts under
+test). Manual against a live session — not an automated harness.
+
+**Read / search scenarios** (the paths the unit tests can't judge for tool-selection
+quality):
+- [ ] **Find-by-name vs find-by-content.** "Where's the config example?" → a path-glob
+      `tree_search` (no `where`); "which files mention `base_sha256`?" → a `where`
+      content predicate. Confirm the model picks the right axis instead of always
+      grepping (or always globbing).
+- [ ] **Ranged read on a large file.** Ask about something deep in a file past
+      `read.maxBytes`; confirm the model pages with `startLine`/`endLine` (using the
+      echoed `totalLines`) rather than giving up on a truncated read or re-reading the
+      head repeatedly.
+- [ ] **Frontmatter vs body distinction.** Ask "which notes are *tagged* california"
+      (vs merely mention it); confirm the model reads `metadataMatches` separately from
+      body `matches` and doesn't conflate a declared tag with an incidental mention.
+- [ ] **`sha256` capture for a later write.** Confirm the model can run a
+      `tree_search` `includeMetadata` pass to capture a file's `sha256` and carry it
+      into a subsequent `file_replace`/`file_overwrite` `base_sha256` without a
+      separate `file_read`.
+- [ ] **Policy-denied / not-found handling.** Ask it to read a blocked path (`.env`, a
+      key) or a missing file; confirm it reports the `POLICY_DENIED`/`NOT_FOUND`
+      gracefully and doesn't loop retrying or try to escape via `..`.
+
+**Write scenarios** (exercise the guardrails the unit tests fire but a model must
+*reach* on its own):
+- [ ] **Tool choice.** "Create a new file X" → `file_create` (not overwrite); "rewrite
+      this whole file" → `file_overwrite`; "change just this section" → `file_replace`.
+- [ ] **Create-vs-overwrite recovery.** Ask it to create a file that already exists;
+      confirm it reads the `PATH_EXISTS` rejection and switches to `file_overwrite`
+      (rather than retrying create verbatim). Mirror with overwrite-on-absent →
+      `NOT_FOUND` → `file_create`.
+- [ ] **Anchor uniqueness under `MATCH_COUNT_MISMATCH`.** Ask for an edit whose `old_str`
+      occurs multiple times; confirm the model lengthens the anchor or sets
+      `expected_replacements` deliberately, and doesn't blindly bump the count to silence
+      the error.
+- [ ] **Concurrency guard.** Pass a captured `base_sha256`, simulate out-of-band drift,
+      and confirm the model surfaces/handles `BASE_SHA_MISMATCH` (re-reads, retries)
+      rather than forcing the write.
+- [ ] **`dry_run` before commit.** Check whether the model uses `dry_run` to confirm an
+      `old_str` resolved uniquely before the real write on ambiguous edits.
+- [ ] **Delete-text via empty `new_str`.** Ask it to remove a section; confirm it reaches
+      for `file_replace` with an empty `new_str` (there is no delete tool) and lands the
+      excision in the right spot — the workflow gap noted in earlier manual testing.
+- [ ] **No-delete/move/rename boundary.** Ask for a rename/move/delete; confirm the model
+      recognizes the boundary (those tools are absent by design, §8.7.5) and proposes a
+      git-side cleanup rather than hallucinating a tool. Capture the friction (stray files
+      after create-then-relocate) as a known rough edge, not a bug.
+- **Done when:** the scenario set runs against a live `claude` session on a writable
+  workspace with recorded pass/fail per scenario, the read/search edges and the
+  rejection-recovery / delete-text write paths are confirmed model-reachable, and any
+  wording fixes from the first pass have landed. Pairs with §16 (shared eval-prompts
+  home) and the §14 pre-flight.
+
+### 21. Read-only `git_diff` — working-tree diff for orientation
+Surface the working-tree diff so the model can see *what changed* before reading or
+editing — the natural companion to `git_status` (which lists changed paths; this
+shows the content). Git-repo workspaces only (else `NOT_A_GIT_REPO`), read-only, no
+`git` binary (go-git, pure Go, like `git_status`). Metadata-adjacent but it *does*
+return file content, so the path arg gates exactly like a read.
+- [ ] **`git_diff` tool** ([mcp/tools.go]) — `{ "path"?: string, "staged"?: bool }`
+      → `{ "diff": string, "truncated": bool, "notice"?: string }` (or a structured
+      per-file hunk list — decide during build; a unified-diff string is the simpler
+      first cut). Whole-worktree when `path` omitted; scoped to one file when given.
+      `staged: true` diffs the index vs HEAD, else worktree vs index/HEAD.
+- [ ] **go-git backend** ([gitaware/], new `diff.go` beside [gitaware/status.go]) —
+      derive the patch from `Worktree().Status()` + the relevant trees
+      (`Patch`/`Object` APIs). Reads via go-git's own billy FS (metadata-style), but
+      because it emits content, see the gating bullet.
+- [ ] **Path gating + limits.** Any `path` rides the workspace's `os.Root` + policy
+      like every other path arg — a blocked/absent path → `POLICY_DENIED`/`NOT_FOUND`
+      (never diff a `.env`/key). Cap the emitted diff by `read.maxBytes`; on the cap,
+      `truncated: true` + a steering `notice` (narrow to a `path`), per §8.4's
+      truncation-steers convention. Skip/flag binary file diffs.
+- [ ] **Annotations + tests** — `readOnlyHint: true`, `openWorldHint: false` like the
+      other reads; `test/gitaware_test.go` covers a dirty worktree (added/modified/
+      deleted), staged vs unstaged, a path-scoped diff, a blocked path → `POLICY_DENIED`,
+      and a non-git workspace → `NOT_A_GIT_REPO`.
+- **Done when:** `git_diff` returns the working-tree (and staged) diff for a git
+  workspace, honors `os.Root` + policy on any `path`, caps by `read.maxBytes` with a
+  steering notice, and returns `NOT_A_GIT_REPO` off a git repo — no `git` binary, no
+  mutation. Composes with `git_status` (list changed → diff them) and ranged
+  `file_read`.
+
 ---
 
 ## 13. Failure modes & error spec
@@ -696,8 +904,16 @@ exactly right; this is the on-brand "research/workflow" surface (§1).
   error; no walk performed.
 - **Bad line range** (task 13: `startLine`/`endLine` < 1, or `startLine` >
   `endLine`) → `INVALID_RANGE`; out-of-bounds-but-ordered ranges clamp instead.
-- **Patch context mismatch** (task 11) → `PATCH_CONFLICT`, "re-read the file and
-  retry"; no partial write.
+- **Write to a read-only workspace** (task 11; `write.enabled` not set) → `READ_ONLY`;
+  the write tools are also absent from `tools/list` for that workspace.
+- **`file_create` onto an existing path** → `PATH_EXISTS` ("use file_overwrite").
+- **`file_overwrite`/`file_replace` on a missing path** → `NOT_FOUND`.
+- **`file_replace` occurrence count ≠ `expected_replacements`** → `MATCH_COUNT_MISMATCH`
+  with the actual count found; no write.
+- **`base_sha256` mismatch** (file changed since read) → `BASE_SHA_MISMATCH` with the
+  file's actual hash ("re-read and retry"); no write.
+- **Write target exceeds `read.maxBytes`** (file too large to read-modify-write
+  safely) → `FILE_TOO_LARGE`; no partial write.
 
 ---
 
@@ -719,7 +935,9 @@ exactly right; this is the on-brand "research/workflow" surface (§1).
 1. claude.ai connects to the server as a remote MCP server over HTTPS.
 2. It can discover workspaces and list / read / search (by path glob and body
    content) allowed files in each, plus git status on git-repo workspaces.
-3. No write/edit/create/delete/shell/Git-mutation path exists (pre-patch task).
+3. No shell/command, file delete/move/rename, or Git-mutation path exists; file
+   create/overwrite/replace exist only on workspaces that opt in via `write.enabled`
+   (§8.7), and are absent entirely on read-only (default) workspaces.
 4. Containment is enforced by a per-workspace `os.Root`; policy refuses sensitive
    in-tree paths; cross-workspace access is impossible.
 5. Escape attempts (`..`, absolute, symlink-out) provably fail in tests.
@@ -730,7 +948,6 @@ exactly right; this is the on-brand "research/workflow" surface (§1).
 
 ## 16. Future enhancements (each its own decision)
 
-- Read-only `git_diff` (working-tree diff) for orientation.
 - **Read-only `git_log` (commit history).** Surface recent commit history for
   orientation, via go-git's `repo.Log(&git.LogOptions{...})` (still pure Go, no
   binary). Two scopes from one tool:

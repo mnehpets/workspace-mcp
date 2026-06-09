@@ -79,6 +79,13 @@ workspaces:
       enabled: true
       workers: 0                       # 0 = GOMAXPROCS
       maxMatches: 500
+    write:
+      enabled: false                   # opt-in writes (file_create/overwrite/replace).
+                                       # Default off → those tools are hidden and any
+                                       # call returns READ_ONLY. Writes are gated by the
+                                       # SAME policy as reads (blockGlobs still win), and
+                                       # the server never commits/pushes/deletes/renames —
+                                       # the human reviews `git diff` and commits.
 
   - name: notes                        # a second, tighter workspace
     root: /absolute/path/to/notes
