@@ -3,6 +3,8 @@ package mcp
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"runtime"
 	"sort"
@@ -74,6 +76,10 @@ type FileResult struct {
 	Matches         []Line `json:"matches,omitempty"`
 	MetadataMatches []Line `json:"metadataMatches,omitempty"`
 	Metadata        string `json:"metadata,omitempty"`
+	// SHA256 is the hex SHA-256 of the file's full bytes, set only when the caller
+	// passes IncludeMetadata — the same hash file_replace/file_overwrite check via
+	// base_sha256, so a discovery pass can capture it for a follow-up edit (§8.7.4).
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 // SearchResult is the flat file list. Notice carries an optional steering hint
@@ -216,6 +222,7 @@ func scanOne(root *Root, fm fileMeta, matchers []*grrep.Matcher, req SearchReque
 			fr.Metadata = meta
 		}
 		f.Close()
+		fr.SHA256 = hashFileFull(root, rel, readCap)
 		return fr, true
 	}
 
@@ -269,7 +276,29 @@ func scanOne(root *Root, fm fileMeta, matchers []*grrep.Matcher, req SearchReque
 	if req.IncludeMetadata && hasFence {
 		fr.Metadata = metaText
 	}
+	if req.IncludeMetadata {
+		fr.SHA256 = hashFileFull(root, rel, readCap)
+	}
 	return fr, true
+}
+
+// hashFileFull streams the hex SHA-256 of a file's full bytes through the
+// workspace os.Root, matching what base_sha256 checks (readForHash). It returns
+// "" if the file is unreadable, errors mid-read, or exceeds cap (a file past the
+// editable limit has no comparable base hash — file_replace would reject it with
+// FILE_TOO_LARGE anyway). cap mirrors the workspace read limit.
+func hashFileFull(root *Root, rel string, limit int64) string {
+	f, err := root.Open(rel)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(f, limit+1))
+	if err != nil || n > limit {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // detectFence locates a leading YAML-style frontmatter fence: line 1 is exactly

@@ -102,6 +102,36 @@ func (r *Root) ReadDir(rel string) ([]fs.DirEntry, error) {
 	return fs.ReadDir(r.root.FS(), clean)
 }
 
+// CreateNew creates a new file for writing through the sandbox, failing if the
+// path already exists (O_CREATE|O_EXCL|O_WRONLY). Missing parent directories are
+// created (MkdirAll, inside the root). The caller owns Close. This is the only
+// path that creates a file, so a collision is reported (os.ErrExist) rather than
+// silently clobbered.
+func (r *Root) CreateNew(rel string) (*os.File, error) {
+	clean, err := Clean(rel)
+	if err != nil {
+		return nil, err
+	}
+	if dir := path.Dir(clean); dir != "." {
+		if err := r.root.MkdirAll(filepath.FromSlash(dir), 0o755); err != nil {
+			return nil, err
+		}
+	}
+	return r.root.OpenFile(filepath.FromSlash(clean), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+}
+
+// WriteExisting opens an existing file for a truncating write through the
+// sandbox (O_TRUNC|O_WRONLY, deliberately no O_CREATE). A missing path fails with
+// os.ErrNotExist rather than creating a stray file — so a typo'd overwrite is a
+// NOT_FOUND, not a silent new file. The caller owns Close.
+func (r *Root) WriteExisting(rel string) (*os.File, error) {
+	clean, err := Clean(rel)
+	if err != nil {
+		return nil, err
+	}
+	return r.root.OpenFile(filepath.FromSlash(clean), os.O_TRUNC|os.O_WRONLY, 0o644)
+}
+
 // WalkDir walks the tree rooted at rel through the sandbox.
 func (r *Root) WalkDir(rel string, fn fs.WalkDirFunc) error {
 	clean, err := Clean(rel)

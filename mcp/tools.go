@@ -32,6 +32,19 @@ func readOnlyAnnotations(title string) map[string]any {
 	}
 }
 
+// writeAnnotations is the annotation set for the opt-in write tools: not
+// read-only, closed-world, and (for the in-place ops) flagged destructive since
+// they replace existing bytes. file_create is non-destructive — it only ever adds
+// a new file.
+func writeAnnotations(title string, destructive bool) map[string]any {
+	return map[string]any{
+		"title":           title,
+		"readOnlyHint":    false,
+		"destructiveHint": destructive,
+		"openWorldHint":   false,
+	}
+}
+
 func schema(props map[string]any, required ...string) map[string]any {
 	s := map[string]any{
 		"type":                 "object",
@@ -48,7 +61,7 @@ func schema(props map[string]any, required ...string) map[string]any {
 // (§17), so no tool takes a `workspace` argument. A tool may still fail per-call
 // for this workspace (disabled grep, non-git tree).
 func (s *Server) toolDefs() []Tool {
-	return []Tool{
+	tools := []Tool{
 		{
 			Name: "workspace_info",
 			Description: "Orientation for THIS workspace (the local directory tree this connector is pointed at): its name, whether it is a git repository, a short description of what it is for, which orientation files (e.g. README.md) exist at its root, an `orientation` string telling you how to use the tools, and a `preview` inlining the start of the top orientation file. " +
@@ -103,6 +116,63 @@ func (s *Server) toolDefs() []Tool {
 				"Orientation only: it neither reads file contents nor modifies anything. No parameters.",
 			InputSchema: schema(map[string]any{}),
 			Annotations: readOnlyAnnotations("Git status"),
+		},
+	}
+	if s.ws.Write.Enabled {
+		tools = append(tools, s.writeToolDefs()...)
+	}
+	return tools
+}
+
+// writeToolDefs returns the opt-in write tools (§8.7). They are only included in
+// tools/list when the workspace sets write.enabled; a write-disabled workspace
+// never advertises them (and a forced call returns READ_ONLY via writeGate).
+func (s *Server) writeToolDefs() []Tool {
+	return []Tool{
+		{
+			Name: "file_create",
+			Description: "Create a NEW file in this workspace with the given contents. " +
+				"Fails with PATH_EXISTS if the path already exists — use file_overwrite to replace an existing file. " +
+				"Missing parent directories are created automatically. Writes raw bytes with no normalization (no trailing-newline or line-ending rewrite), so include exactly the bytes you want. " +
+				"Returns the resulting `sha256` (pass it as a later edit's `base_sha256`).",
+			InputSchema: schema(map[string]any{
+				"path":     map[string]any{"type": "string", "description": "Workspace-relative path of the file to create."},
+				"contents": map[string]any{"type": "string", "description": "Full contents of the new file, written verbatim."},
+			}, "path", "contents"),
+			Annotations: writeAnnotations("Create file", false),
+		},
+		{
+			Name: "file_overwrite",
+			Description: "Replace the ENTIRE contents of an existing file in this workspace. " +
+				"Use it when a file changes so substantially that quoting an `old_str` would be pointless; for a localized edit prefer file_replace. " +
+				"Fails with NOT_FOUND if the path does not exist (use file_create), so a typo can't silently create a stray file. " +
+				"Pass `base_sha256` (the file's current hash, e.g. from tree_search/file metadata) to reject the write if the file changed since you read it (BASE_SHA_MISMATCH). " +
+				"Pass `dry_run: true` to preview the resulting hash without writing. Writes raw bytes with no normalization.",
+			InputSchema: schema(map[string]any{
+				"path":        map[string]any{"type": "string", "description": "Workspace-relative path of the existing file to overwrite."},
+				"contents":    map[string]any{"type": "string", "description": "Full new contents, written verbatim."},
+				"base_sha256": map[string]any{"type": "string", "description": "Optional optimistic-concurrency guard: the file's expected current hex SHA-256. The write is rejected with BASE_SHA_MISMATCH (returning the actual hash) if it differs."},
+				"dry_run":     map[string]any{"type": "boolean", "description": "If true, validate and return the would-be result hash without writing (default false)."},
+			}, "path", "contents"),
+			Annotations: writeAnnotations("Overwrite file", true),
+		},
+		{
+			Name: "file_replace",
+			Description: "Replace occurrences of an exact substring (`old_str`) with `new_str` in an existing file. " +
+				"Matches raw bytes exactly — no whitespace or line-ending normalization — so quote `old_str` precisely, including indentation. " +
+				"By default exactly ONE occurrence must match; the call is rejected with MATCH_COUNT_MISMATCH (echoing the actual count) otherwise, which guarantees you edited the span you meant. " +
+				"Set `expected_replacements` to change all N matches deliberately. Empty `old_str` is rejected. " +
+				"Optional `base_sha256` (reject on drift) and `dry_run` (preview the match count and resulting hash without writing) behave as in file_overwrite. " +
+				"Files larger than the workspace read limit are rejected with FILE_TOO_LARGE.",
+			InputSchema: schema(map[string]any{
+				"path":                  map[string]any{"type": "string", "description": "Workspace-relative path of the existing file to edit."},
+				"old_str":               map[string]any{"type": "string", "description": "Exact substring to find (matched against raw bytes, verbatim). Must be non-empty."},
+				"new_str":               map[string]any{"type": "string", "description": "Replacement substring (may be empty to delete the matched text)."},
+				"expected_replacements": map[string]any{"type": "integer", "description": "Number of occurrences that must match (default 1). The edit is rejected unless the actual count equals this exactly."},
+				"base_sha256":           map[string]any{"type": "string", "description": "Optional optimistic-concurrency guard: the file's expected current hex SHA-256 (BASE_SHA_MISMATCH on drift)."},
+				"dry_run":               map[string]any{"type": "boolean", "description": "If true, return the match count and resulting hash without writing (default false)."},
+			}, "path", "old_str", "new_str"),
+			Annotations: writeAnnotations("Replace in file", true),
 		},
 	}
 }

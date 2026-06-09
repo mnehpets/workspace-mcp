@@ -70,6 +70,7 @@ type instructionsData struct {
 	Description    string // this workspace's description (may be empty)
 	WellKnownFiles string // orientation files, comma-joined (empty when none)
 	IsGitRepo      bool
+	Writable       bool // the opt-in write surface is enabled for this workspace
 }
 
 // instructionsTemplate renders the MCP `instructions` string for one workspace.
@@ -78,7 +79,7 @@ type instructionsData struct {
 // orient-first flow and the hard constraints. Trim markers ({{- / -}}) keep the
 // conditional blocks from leaving stray blank lines.
 var instructionsTemplate = template.Must(template.New("instructions").Parse(
-	`This server is a read-only window into a single local directory tree (a "workspace") on the user's machine — notes, docs, papers, code, or data. It hands you raw bytes plus cheap orientation; YOU do the analysis. It is not a coding agent and cannot run commands or write anything.
+	`This server is a window into a single local directory tree (a "workspace") on the user's machine — notes, docs, papers, code, or data. It hands you raw bytes plus cheap orientation; YOU do the analysis. {{if .Writable}}It can also create and edit files in this tree (see below), but it is not a coding agent and cannot run commands.{{else}}It is read-only: it is not a coding agent and cannot run commands or write anything.{{end}}
 {{if .Description}}
 This workspace: {{.Description}}
 {{end}}
@@ -92,8 +93,11 @@ How to use it:
 3. Read: file_read returns a file's contents; large files truncate at a byte cap (raise "maxBytes" up to the workspace limit).
 {{if .IsGitRepo -}}
 4. git_status gives the current branch + per-file change codes (this workspace is a git repository).
-{{end}}
-Constraints: read-only (no writes, shell, or git mutation exist). Access is default-deny — some paths are intentionally invisible, so a NOT_FOUND or POLICY_DENIED is an expected answer, not a transient error to retry. All paths are workspace-relative; absolute paths and ".." are rejected.`))
+{{end -}}
+{{if .Writable}}
+Editing (only when the user asks you to change files): file_create writes a new file (fails if it exists), file_overwrite replaces an existing file wholesale, and file_replace swaps an exact substring (defaults to a unique single match). Edits write raw bytes with no normalization; pass a file's current "sha256" (from tree_search "includeMetadata", or a prior write) as "base_sha256" to refuse the write if the file changed underneath you, and "dry_run": true to preview. Writes go only where reads are allowed — blocked paths stay unwritable. The human reviews the diff in git and commits; this server never commits, pushes, deletes, moves, or renames.
+{{end -}}
+Constraints: {{if .Writable}}create/overwrite/replace are the only mutations — no shell, no git mutation, no delete/move/rename.{{else}}read-only (no writes, shell, or git mutation exist).{{end}} Access is default-deny — some paths are intentionally invisible, so a NOT_FOUND or POLICY_DENIED is an expected answer, not a transient error to retry. All paths are workspace-relative; absolute paths and ".." are rejected.`))
 
 // workspaceInstructions renders the `instructions` string for one workspace. It
 // is best-effort: the spec lets servers send it, but general-purpose hosts may
@@ -105,6 +109,7 @@ func workspaceInstructions(ws *Workspace) string {
 		Description:    ws.Description,
 		WellKnownFiles: strings.Join(ws.WellKnownFiles, ", "),
 		IsGitRepo:      ws.IsGitRepo,
+		Writable:       ws.Write.Enabled,
 	}); err != nil {
 		// The template is a compile-time constant with trivial fields; an execution
 		// error is impossible in practice. Degrade to empty rather than panic.
@@ -235,6 +240,12 @@ var toolHandlers = map[string]toolFunc{
 	"file_read":      (*Server).fileRead,
 	"tree_search":    (*Server).treeSearch,
 	"git_status":     (*Server).gitStatus,
+	// Write surface (§8.7). Always registered so a forced call on a write-disabled
+	// workspace returns READ_ONLY (via writeGate) rather than "unknown tool"; they
+	// only appear in tools/list when write.enabled (see toolDefs).
+	"file_create":    (*Server).fileCreate,
+	"file_overwrite": (*Server).fileOverwrite,
+	"file_replace":   (*Server).fileReplace,
 }
 
 // --- error model ---

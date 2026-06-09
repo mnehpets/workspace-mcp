@@ -82,6 +82,7 @@ type WorkspaceConfig struct {
 	Policy           PolicyConfig `yaml:"policy"`
 	Read             ReadConfig   `yaml:"read"`
 	Grep             GrepConfig   `yaml:"grep"`
+	Write            WriteConfig  `yaml:"write"`
 }
 
 // PolicyConfig is the per-workspace allow/deny glob policy. Block always wins.
@@ -93,6 +94,15 @@ type PolicyConfig struct {
 // ReadConfig bounds file reads.
 type ReadConfig struct {
 	MaxBytes int64 `yaml:"maxBytes"`
+}
+
+// WriteConfig enables the opt-in write surface (file_create/file_overwrite/
+// file_replace) for one workspace. Default off: with Enabled false the write
+// tools are absent from tools/list and any forced call returns READ_ONLY. The
+// writable surface is gated by the *same* policy as reads — there is no separate
+// write allowlist (see §8.7).
+type WriteConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // GrepConfig configures the content search tool.

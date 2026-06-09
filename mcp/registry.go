@@ -25,6 +25,7 @@ type Workspace struct {
 	IsGitRepo      bool
 	Read           ReadConfig
 	Grep           GrepConfig
+	Write          WriteConfig
 	Description    string   // what the tree is for; config-supplied or README-derived. May be empty.
 	WellKnownFiles []string // orientation files present at the root (subset of wellKnownCandidates).
 }
@@ -59,6 +60,7 @@ func Build(cfg *Config) (*Registry, error) {
 			IsGitRepo: gitaware.Detect(wc.Root),
 			Read:      wc.Read,
 			Grep:      wc.Grep,
+			Write:     wc.Write,
 		}
 		// Orientation metadata, computed once at startup. Both ride the workspace's
 		// os.Root + policy: a blocked/missing file simply contributes nothing.

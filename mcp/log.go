@@ -50,6 +50,7 @@ type ToolEvent struct {
 	Reason    string
 	Bytes     int
 	Matches   int
+	Hash      string // content hash of a write (sha256 hex), for the audit trail; never the bytes
 	Err       string
 }
 
@@ -64,6 +65,7 @@ func (a *Logger) ToolCall(e ToolEvent) {
 		"reason", e.Reason,
 		"bytes", e.Bytes,
 		"matches", e.Matches,
+		"hash", e.Hash,
 		"err", e.Err,
 	)
 }
