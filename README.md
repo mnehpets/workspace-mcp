@@ -25,7 +25,22 @@ claude.ai (web app)
   → local directory tree(s) — git repos get extra operations
 ```
 
+## Install
+
+```sh
+go install github.com/mnehpets/workspace-mcp/cmd/workspace-mcp@latest
+```
+
+The `main` package lives under `cmd/workspace-mcp`, so the install path must
+include it — `go install github.com/mnehpets/workspace-mcp@latest` (without the
+subpath) fails with "does not contain package". This drops a `workspace-mcp`
+binary in `$(go env GOBIN)` (or `$GOPATH/bin`). Pin a release with `@v0.1.0`
+instead of `@latest`.
+
 ## Build
+
+`go install` above is all an end user needs. Build from source only when you're
+working on the code:
 
 ```sh
 go build ./cmd/workspace-mcp
@@ -82,7 +97,7 @@ Requires Go 1.26+ (the `go.mod` toolchain); the `os.Root` sandbox itself needs 1
 ## Run
 
 ```sh
-./workspace_mcp -config config.yaml -env secrets.env
+./workspace-mcp -config config.yaml -env secrets.env
 # health check (no auth):
 curl http://127.0.0.1:3850/healthz   # -> {"ok":true}
 ```
@@ -102,14 +117,14 @@ workspace configured it is selected implicitly; with more than one, name it with
 `-workspace`:
 
 ```sh
-./workspace_mcp -stdio -config config.yaml                 # one workspace configured
-./workspace_mcp -stdio -workspace default -config config.yaml   # pick one of several
+./workspace-mcp -stdio -config config.yaml                 # one workspace configured
+./workspace-mcp -stdio -workspace default -config config.yaml   # pick one of several
 ```
 
 Try it with the MCP Inspector:
 
 ```sh
-npx @modelcontextprotocol/inspector ./workspace_mcp -stdio -config config.yaml
+npx @modelcontextprotocol/inspector ./workspace-mcp -stdio -config config.yaml
 ```
 
 Or drive it by hand (newline-delimited JSON-RPC on stdin):
@@ -118,7 +133,7 @@ Or drive it by hand (newline-delimited JSON-RPC on stdin):
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-  | ./workspace_mcp -stdio -config config.yaml
+  | ./workspace-mcp -stdio -config config.yaml
 ```
 
 Note: claude.ai itself only connects to *remote* servers, so use the HTTP +
@@ -144,7 +159,7 @@ relying on this repo's `.mcp.json`:
 ```sh
 claude mcp add-json workspace-mcp '{
   "type": "stdio",
-  "command": "/absolute/path/to/workspace_mcp",
+  "command": "/absolute/path/to/workspace-mcp",
   "args": ["-stdio", "-workspace", "default", "-config", "/absolute/path/to/config.local.yaml"]
 }'
 ```
@@ -237,7 +252,7 @@ reasoning is in [docs/design.md §2](docs/design.md).
 
 ## Shutdown
 
-Stop the `workspace_mcp` process (Ctrl-C). With built-in ngrok the tunnel tears down
+Stop the `workspace-mcp` process (Ctrl-C). With built-in ngrok the tunnel tears down
 automatically — no separate agent to stop.
 
 ## Layout
