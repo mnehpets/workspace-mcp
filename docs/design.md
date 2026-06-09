@@ -150,8 +150,11 @@ mcp/                 Everything except the vendored search core and git layer.
                      store.
   registry.go        The workspace registry: name → Workspace{ *os.Root, Policy,
                      Ignore, Read/Grep settings, IsGitRepo }. Built once at startup.
-                     Lookup by name → UNKNOWN_WORKSPACE otherwise. Also resolves
-                     workspace descriptions and wellKnownFiles at startup.
+                     Keyed by the URL path segment (§5.0); also resolves workspace
+                     descriptions and wellKnownFiles at startup.
+  handler.go         BuildHandler: HTTP routes. One MCP endpoint per workspace at
+                     /mcp/<name> (the workspace-per-URL router), /healthz, OAuth
+                     discovery + endpoints, and the SSE keepalive stream.
   root.go            The os.Root wrapper. Clean() rejects absolute/`..` paths;
                      Open/Stat/ReadDir/WalkDir take workspace-relative paths and
                      stay in the sandbox. The containment primitive.
@@ -167,8 +170,9 @@ mcp/                 Everything except the vendored search core and git layer.
   server.go          The protocol surface and the gate: initialize / tools/list /
                      tools/call / ping, error model, dispatch table.
   tools.go           Tool catalog + JSON Schemas + one handler per tool, each
-                     running the full gate (resolve workspace → enablement →
-                     path policy → root/search/gitaware → limits → audit).
+                     running the full gate (enablement → path policy →
+                     root/search/gitaware → limits → audit) on the endpoint's
+                     bound workspace.
 
 grrep/               Vendored from bep/grrep (Apache-2.0, SPDX retained, see
                      NOTICE). match.go verbatim (Matcher + literal pre-filter);
@@ -184,10 +188,10 @@ gitaware/            go-git (pure Go) git-awareness, metadata only. detect.go
 The shape of a tool call, end to end ([mcp/server.go], [mcp/tools.go]):
 
 ```
-POST /mcp → bearer (mcp/auth.go) → jsonrpc dispatch → ToolsCall
+POST /mcp/<name> → route to that workspace's endpoint (mcp/handler.go; unknown → 404)
+  → bearer (mcp/auth.go) → jsonrpc dispatch → ToolsCall (Server bound to the workspace)
   → allowlist tool name (else JSON-RPC InvalidParams)
   → handler: unmarshal args
-           → resolve `workspace` (mcp/registry.go)   → UNKNOWN_WORKSPACE
            → per-workspace enablement (grep on? git?) → GREP_DISABLED / NOT_A_GIT_REPO
            → root.Clean(path) + policy.CheckFile/Dir  → POLICY_DENIED
            → do the one read (mcp/root.go / search / gitaware)
@@ -205,8 +209,8 @@ Config is a **YAML file** (`-config`, default `./config.yaml`), chosen over flat
 with its own policy globs, read/grep limits. Parsed into a typed struct with
 `KnownFields(true)` so an unknown key is an *error*, not a silent typo
 ([mcp/config.go]). Validated semantically at startup ([mcp/config.go]):
-≥ 1 workspace, unique names, a `default` must exist (it's the fallback for the
-`workspace` param), each `root` exists and is a directory, globs compile,
+≥ 1 workspace, unique names, a `default` must exist (the conventional endpoint
+`/mcp/default` and the implicit stdio target), each `root` exists and is a directory, globs compile,
 `read.maxBytes` positive, and (HTTP mode only) port in range + resolved bearer
 ≥ 32 bytes.
 
@@ -277,6 +281,20 @@ JSON-RPC 2.0, so the whole surface is the reflection-based jsonrpc registry from
 `github.com/mnehpets/http`; slash-named methods use the `_ jsonrpc:"…"` struct-tag
 override ([mcp/server.go:48]).
 
+### 5.0 Workspace-per-URL routing
+
+Workspace selection is by **route**, not by argument: each configured workspace
+gets its own MCP endpoint at `POST/GET /mcp/<name>`, so a claude.ai connector URL
+*is* a workspace ([mcp/handler.go], `BuildHandler`). The path segment maps to a
+registry entry; an unknown segment is a plain HTTP **404** (no matching route),
+not a domain error. This collapses what used to be step (1) of the per-call gate
+(resolve `workspace` → `UNKNOWN_WORKSPACE`) into routing done once at the HTTP
+layer, and removes the `workspace` argument from every tool. Auth stays
+server-wide (one bearer/OAuth across all paths); per-workspace policy remains the
+AuthZ layer. **stdio** has no URL, so it serves exactly one workspace — implicit
+when only one is configured, else named via `-workspace` ([cmd/workspace-mcp/main.go],
+`selectStdioWorkspace`).
+
 ### 5.1 Protocol methods
 
 | Method | Behavior |
@@ -284,8 +302,8 @@ override ([mcp/server.go:48]).
 | `initialize` | Negotiate protocol version (supported, newest-first: `2025-06-18`, `2025-03-26`, `2024-11-05`; unknown → our newest). Advertise `{ capabilities: { tools: {} } }` + serverInfo `{ name: "workspace-mcp", version }` + an `instructions` string (§5.5). ([mcp/server.go:67]) |
 | `notifications/initialized` | Accept; no response. |
 | `ping` | Respond with `{}`. |
-| `tools/list` | Return the catalog (§5.3). Workspace-*independent*; the `workspace` param's enum is filled from config so the model sees valid names + the default. ([mcp/server.go:123]) |
-| `tools/call` | The gate. Unknown tool name → JSON-RPC `InvalidParams` (protocol error). Domain failures (bad path, unknown workspace, …) are **not** JSON-RPC errors — they come back as a normal result with `isError: true` and a machine-readable code (§5.4). ([mcp/server.go:154]) |
+| `tools/list` | Return the catalog (§5.3). The workspace is fixed by the endpoint URL (§5.0), so no tool takes a `workspace` param. ([mcp/server.go]) |
+| `tools/call` | The gate. Unknown tool name → JSON-RPC `InvalidParams` (protocol error). Domain failures (bad path, non-git tree, …) are **not** JSON-RPC errors — they come back as a normal result with `isError: true` and a machine-readable code (§5.4). ([mcp/server.go]) |
 
 ### 5.2 Result envelope
 
@@ -302,19 +320,30 @@ is JSON-serialized into a single text block ([mcp/server.go:245]):
 
 ### 5.3 Tools
 
-Six tools today ([mcp/tools.go:58]). **Every tool except `workspace_list` takes a
-`workspace` string** (optional; omit → `"default"`; advertised as a JSON-Schema
-`enum` of configured names). All `path` args are workspace-relative and resolve
-through that workspace's `os.Root`. Schemas use `additionalProperties: false`.
-Every tool also carries read-only MCP **annotations** (§5.5).
+Four tools today ([mcp/tools.go]). **No tool takes a `workspace` argument** — the
+workspace is fixed by the endpoint URL (§5.0). All `path` args are
+workspace-relative and resolve through that workspace's `os.Root`. Schemas use
+`additionalProperties: false`. Every tool also carries read-only MCP
+**annotations** (§5.5).
 
 > Notation below: `in` = input properties (★ = required), `out` = the structured
 > JSON inside the result's text block.
 
-#### `workspace_list`
-Discover the configured trees. No params.
-- **out** `{ "workspaces": [ { "name": string, "isGitRepo": bool, "description"?:
-  string, "wellKnownFiles"?: [ string, … ] } ] }`. Never exposes roots.
+#### `workspace_info`
+Orientation for *this* workspace (the tree this endpoint is bound to). No params.
+Deliberately returns the **same payload** as the initialize `instructions` string
+(§5.5): `orientation` is that exact text, so the tool is the dependable mirror for
+hosts that ignore server `instructions`. The structured fields are the
+machine-readable source the prose is built from. It is *not* a mandated first call
+— a host that surfaced `instructions` already has everything here.
+- **out** `{ "name": string, "isGitRepo": bool, "description": string,
+  "wellKnownFiles": [ string, … ], "orientation": string, "preview"?: { "path":
+  string, "content": string, "truncated": bool, "totalLines"?: int } }`. Never
+  exposes the root path.
+- `preview` inlines the start of the highest-priority well-known file (capped at
+  200 lines / 16 KB, bounded by `read.maxBytes`, read live through `os.Root`,
+  binary skipped) so the common "orient by reading the README" move needs no
+  follow-up `file_read`. Absent when there is no well-known file.
 - `wellKnownFiles` lists the orientation files present at the root, auto-detected
   by a closed convention recognizer (§5.5) — a curated stem set (`readme`, `index`,
   `_index`, `contents`, `toc`, `overview`, `about`, `agents`, `claude`) matched
@@ -326,7 +355,7 @@ Discover the configured trees. No params.
 
 #### `file_read`
 Read one allowed file, optionally a line span.
-- **in** `path` ★, `workspace`, `maxBytes` (capped by `read.maxBytes`),
+- **in** `path` ★, `maxBytes` (capped by `read.maxBytes`),
   `startLine`/`endLine` (1-based inclusive, either omittable → open-ended),
   `allowBinary` (bool)
 - **out** `{ "path": string, "content": string, "truncated": bool, "binary": bool,
@@ -416,7 +445,6 @@ Domain failures return `isError: true` with `{ code, message, reason? }`
 
 | Code | When | `reason` values |
 |---|---|---|
-| `UNKNOWN_WORKSPACE` | named workspace not configured | — |
 | `NOT_A_GIT_REPO` | git tool on a non-git workspace | — |
 | `GREP_DISABLED` | `tree_search` with `where` predicates where `grep.enabled` is false | — |
 | `POLICY_DENIED` | path blocked or outside the sandbox | `absolute_path`, `traversal`, `outside_root`, `blocked_glob`, dotfile reason |
@@ -425,10 +453,13 @@ Domain failures return `isError: true` with `{ code, message, reason? }`
 | `INVALID_ARGS` | arguments fail to unmarshal | — |
 | `INTERNAL` | unexpected server error (no detail leaked) | — |
 
-Two failures are *not* in this envelope: an **unknown tool name** is a JSON-RPC
-`InvalidParams` protocol error, and a **missing/invalid bearer** is an HTTP `401`
-with no body detail. `NOT_FOUND` is deliberately indistinguishable from a policy
-denial where distinguishing would leak the existence of a blocked path.
+Three failures are *not* in this envelope: an **unknown tool name** is a JSON-RPC
+`InvalidParams` protocol error; a **missing/invalid bearer** is an HTTP `401` (with
+a `WWW-Authenticate: Bearer resource_metadata="…"` hint when OAuth is configured,
+RFC 9728); and an **unknown workspace** is now an HTTP `404` — selection is by
+route (§5.0), so there is no longer a per-call `UNKNOWN_WORKSPACE` domain error.
+`NOT_FOUND` is deliberately indistinguishable from a policy denial where
+distinguishing would leak the existence of a blocked path.
 
 ### 5.5 Orientation — how the model learns what to do
 
@@ -437,28 +468,35 @@ navigate*. Tool descriptions are prompts: every word shapes selection, so we
 spend orientation cheaply at three layers, designed to be redundant because
 general-purpose hosts may ignore any one of them.
 
-- **Server `instructions`** ([mcp/server.go]) — a short string returned at
-  `initialize`, before any reasoning: the server's identity (a read-only window
-  onto local trees for research/workflow, *not* a coding agent; the model does the
-  analysis), the orient-first flow (`workspace_list` → read README → locate →
-  read), and the hard constraints (read-only; default-deny, so `NOT_FOUND` /
-  `POLICY_DENIED` are *expected answers*, not transient errors to retry).
-  **Best-effort:** the MCP spec lets servers send it, but some hosts ignore it
-  (claude.ai's handling is unverified — a behavioral eval is still pending). So it is never
-  load-bearing; the two layers below stand alone.
+- **Server `instructions`** ([mcp/server.go], `workspaceInstructions`) — a short
+  string returned at `initialize`, before any reasoning. Because the URL already
+  picked the tree (§5.0), it is **workspace-specific**: it folds in *this*
+  workspace's `description` and detected `wellKnownFiles`, then the server's
+  identity (a read-only window onto a local tree for research/workflow, *not* a
+  coding agent; the model does the analysis), the orient-first flow
+  (read README → locate → read), and the hard constraints
+  (read-only; default-deny, so `NOT_FOUND` / `POLICY_DENIED` are *expected
+  answers*, not transient errors to retry). **Best-effort:** the MCP spec lets
+  servers send it, but some hosts ignore it (claude.ai's handling is unverified —
+  a behavioral eval is still pending). So it is never load-bearing; the two layers
+  below stand alone.
 - **Tool descriptions** ([mcp/tools.go]) — each says *what* it does, *when* to
   reach for it, and its *boundary vs siblings* (e.g. `tree_search` = locate by
   path glob and/or content; `file_read` follows the locator).
-  `workspace_list` is worded as the **"start here"** entry point — the natural
-  first call that survives a host dropping `instructions`.
+  `workspace_info` returns the **same orientation** as `instructions` (its
+  `orientation` field is that exact text) — the tool-surface mirror that survives
+  a host dropping `instructions`. Because the orientation (`description` +
+  `wellKnownFiles`) is already embedded in `instructions`, it is *not* advertised
+  as a mandated first call: a host that surfaced `instructions` already has it.
 - **Tool annotations** ([mcp/tools.go]) — every tool carries MCP
   `{ readOnlyHint: true, openWorldHint: false }` plus a human `title`. A
   machine-readable restatement of "this only reads, and only from the local
   sandbox," which clients can surface in UI and trust decisions.
 
 **Orientation files are auto-detected by convention, not configured.** A fourth,
-quieter layer: `workspace_list` surfaces each tree's orientation files
-(`wellKnownFiles`) and a `description`. These are found by a **closed,
+quieter layer: `workspace_info` (and the workspace-specific `instructions`)
+surface the tree's orientation files (`wellKnownFiles`) and a `description`. These
+are found by a **closed,
 server-owned recognizer** — a curated set of root-file stems (`readme`, `index`,
 `_index`, `contents`, `toc`, `overview`, `about`, `agents`, `claude`) matched
 case-insensitively and extension-agnostically, presence-only and policy-gated,
@@ -516,9 +554,10 @@ author-controlled repo manifest; a meaning-ranked mode on `tree_search` (an opt-
 semantic upgrade, not a new tool). A corpus-wide `tree_metadata` tag/frontmatter
 rollup was considered and **rejected** — it serves database-like querying of a
 *known* schema, contradicting the orient-an-*unfamiliar*-tree premise; content
-search already finds metadata values as plain text. (Richer `workspace_list` with
-`description`/`wellKnownFiles`, ranged `file_read`, raw-binary `file_read`, and the
-consolidated `tree_search` have since landed.) Anything that would have the server
+search already finds metadata values as plain text. (Workspace-per-URL routing
+with a per-tree `workspace_info`, `description`/`wellKnownFiles` orientation,
+ranged `file_read`, raw-binary `file_read`, and the consolidated `tree_search`
+have since landed.) Anything that would have the server
 rank by meaning, build graphs, or summarize is **out** — that is the model's job.
 
 **MCP `resources/list` + `resources/read` — considered, deprioritized.** The

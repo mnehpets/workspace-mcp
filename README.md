@@ -82,7 +82,7 @@ Requires Go 1.26+ (the `go.mod` toolchain); the `os.Root` sandbox itself needs 1
 ## Run
 
 ```sh
-./shim -config config.yaml -env secrets.env
+./workspace_mcp -config config.yaml -env secrets.env
 # health check (no auth):
 curl http://127.0.0.1:3850/healthz   # -> {"ok":true}
 ```
@@ -97,14 +97,19 @@ in this mode — stdio is a trusted local pipe. The same sandbox, policy, and
 read-only guarantees still apply; only the transport differs. All logs go to
 stderr so stdout stays a clean JSON-RPC channel.
 
+Stdio has no URL to carry the workspace, so it serves exactly one. With a single
+workspace configured it is selected implicitly; with more than one, name it with
+`-workspace`:
+
 ```sh
-./shim -stdio -config config.yaml
+./workspace_mcp -stdio -config config.yaml                 # one workspace configured
+./workspace_mcp -stdio -workspace default -config config.yaml   # pick one of several
 ```
 
 Try it with the MCP Inspector:
 
 ```sh
-npx @modelcontextprotocol/inspector ./shim -stdio -config config.yaml
+npx @modelcontextprotocol/inspector ./workspace_mcp -stdio -config config.yaml
 ```
 
 Or drive it by hand (newline-delimited JSON-RPC on stdin):
@@ -113,7 +118,7 @@ Or drive it by hand (newline-delimited JSON-RPC on stdin):
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-  | ./shim -stdio -config config.yaml
+  | ./workspace_mcp -stdio -config config.yaml
 ```
 
 Note: claude.ai itself only connects to *remote* servers, so use the HTTP +
@@ -139,8 +144,8 @@ relying on this repo's `.mcp.json`:
 ```sh
 claude mcp add-json workspace-mcp '{
   "type": "stdio",
-  "command": "/absolute/path/to/shim",
-  "args": ["-stdio", "-config", "/absolute/path/to/config.local.yaml"]
+  "command": "/absolute/path/to/workspace_mcp",
+  "args": ["-stdio", "-workspace", "default", "-config", "/absolute/path/to/config.local.yaml"]
 }'
 ```
 
@@ -173,9 +178,15 @@ unused — the server does not bind a local TCP port.
 
 In claude.ai → **Settings → Connectors → Add custom connector**.
 
-The connector URL is your tunnel domain with the `/mcp` path:
+The connector URL is your tunnel domain plus `/mcp/<workspace>` — **one
+workspace per connector**. The path segment selects the tree, so the URL *is* the
+workspace; register a separate connector for each tree you want to expose.
 
-- **URL:** `https://<your-domain>/mcp` (e.g. `https://xxxx.ngrok.app/mcp`)
+- **URL:** `https://<your-domain>/mcp/<workspace>` (e.g.
+  `https://xxxx.ngrok.app/mcp/default` or `.../mcp/notes`)
+
+The workspace names come from `config.yaml` (`workspaces[].name`). Tools take no
+`workspace` argument — the endpoint already picked it.
 
 **With OAuth** (the only auth type claude.ai currently supports):
 
@@ -204,13 +215,13 @@ Then start a chat and ask Claude to use the connector, e.g.:
 
 | Tool             | What it does                                                        |
 | ---------------- | ------------------------------------------------------------------- |
-| `workspace_list` | List configured workspaces (`{name, isGitRepo}`). No params.        |
+| `workspace_info` | Orientation for *this* workspace (`{name, isGitRepo, description, wellKnownFiles, orientation, preview}`). No params. Mirrors the connect-time `instructions` (fallback for hosts that ignore them) and inlines a capped preview of the top orientation file. |
 | `file_read`      | Read one allowed file (`path`, optional `maxBytes`).               |
 | `tree_search`    | Find/browse files by `path` glob and/or `where` content predicates (frontmatter-aware); each result carries its `size`. |
 | `git_status`     | Branch + per-file status — git-repo workspaces only.              |
 
-Every tool except `workspace_list` takes a `workspace` string (defaults to
-`"default"`). All paths are workspace-relative and resolved through that
+No tool takes a `workspace` argument: the workspace is fixed by the connector URL
+(`/mcp/<workspace>`). All paths are workspace-relative and resolved through that
 workspace's `os.Root`. Full input/output schemas and the error spec are in
 [docs/design.md §5](docs/design.md).
 
@@ -226,7 +237,7 @@ reasoning is in [docs/design.md §2](docs/design.md).
 
 ## Shutdown
 
-Stop the `shim` process (Ctrl-C). With built-in ngrok the tunnel tears down
+Stop the `workspace_mcp` process (Ctrl-C). With built-in ngrok the tunnel tears down
 automatically — no separate agent to stop.
 
 ## Layout

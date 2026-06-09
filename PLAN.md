@@ -578,46 +578,52 @@ stops being step (4) of the gate (§9, §10.1) and becomes routing done once at 
 HTTP layer. The registry stays; it's keyed by the path segment instead of an arg.
 Rationale and trade-offs are in [docs/design.md] (the single-workspace-at-a-time
 use case; register more endpoints for more trees).
-- [ ] Route the MCP endpoints under a workspace path segment in `buildHandler`
-      ([cmd/workspace-mcp/main.go]); map `<name>` → registry entry at dispatch, 404 (not
+- [x] Route the MCP endpoints under a workspace path segment in `BuildHandler`
+      ([mcp/handler.go]); map `<name>` → registry entry at dispatch, 404 (not
       a domain error) on an unknown segment. Keep auth server-wide (one bearer/OAuth
-      for all paths; AuthZ stays per-workspace policy).
-- [ ] Drop the `workspace` property from every tool's input schema and handler
+      for all paths; AuthZ stays per-workspace policy). *(buildHandler moved from
+      cmd into mcp as the reusable `BuildHandler`, one endpoint per workspace.)*
+- [x] Drop the `workspace` property from every tool's input schema and handler
       ([mcp/tools.go]); remove the enum-from-config plumbing and the
       `UNKNOWN_WORKSPACE` path. The selected `*os.Root`/policy comes from the route.
-- [ ] **stdio has no URL** — add `-workspace <name>` (or require a single-workspace
+      *(`Server` now binds one `*Workspace`; `resolveWS`/`mapWorkspaceError` removed.)*
+- [x] **stdio has no URL** — add `-workspace <name>` (or require a single-workspace
       config in stdio mode) so `serveStdio` ([cmd/workspace-mcp/main.go]) binds one
-      workspace. Document it.
-- [ ] **OAuth well-known under a path prefix** — verify how claude.ai resolves
+      workspace. Document it. *(`selectStdioWorkspace`: implicit when one configured,
+      named via `-workspace` otherwise.)*
+- [x] **OAuth well-known under a path prefix** — verify how claude.ai resolves
       `.well-known/oauth-protected-resource` / `oauth-authorization-server` (RFC 9728)
       when the MCP endpoint sits under `/mcp/<name>`. One auth server for all paths is
-      the intent; confirm the protected-resource metadata still resolves. This is the
-      one place the refactor can bite ([mcp/oauth.go], [cmd/workspace-mcp/main.go]).
-- [ ] **Emit `WWW-Authenticate` on the 401** (RFC 9728, MCP 2025-11-25) — the bare
+      the intent; confirm the protected-resource metadata still resolves. *(Served at
+      both the bare path and `.../mcp/<name>`; `resource` echoes the per-endpoint path,
+      one `authorization_servers` entry. Live claude.ai confirmation still pending.)*
+- [x] **Emit `WWW-Authenticate` on the 401** (RFC 9728, MCP 2025-11-25) — the bare
       401 ([mcp/auth.go]) should carry `WWW-Authenticate: Bearer resource_metadata="…"`
-      pointing at this endpoint's `.well-known/oauth-protected-resource`. It's the
-      standard OAuth-discovery trigger, and with §17's per-endpoint URLs the header can
-      name the per-`<name>` resource explicitly rather than leaving the client to guess
-      the well-known path. Keep the body detail-free; the header is the only addition.
-- [ ] **Remove `workspace_list`** — with one workspace per endpoint, cross-workspace
+      pointing at this endpoint's `.well-known/oauth-protected-resource`. *(Added via
+      `Bearer.WithResourceMetadata`, enabled only when OAuth is configured; names the
+      per-`<name>` resource from the request path.)*
+- [x] **Remove `workspace_list`** — with one workspace per endpoint, cross-workspace
       discovery has no job. Its orientation payload (`description` + `wellKnownFiles`)
       moves to the two tools-only homes below (§18-adjacent). Update
       `test/workspace_test.go`, `test/mcp_test.go`, and the §5.3/§8.1 docs.
-- [ ] **Orientation home (1): `initialize` instructions.** The instructions string
+- [x] **Orientation home (1): `initialize` instructions.** The instructions string
       is now workspace-specific (the URL picked the tree) — render that workspace's
       `description` + detected `wellKnownFiles` (already computed in [mcp/registry.go])
       into it, so the model is told what the tree is and where to start before any
-      reasoning ([mcp/server.go]).
-- [ ] **Orientation home (2): a no-arg orient tool.** Replace `workspace_list` with a
+      reasoning ([mcp/server.go]). *(Rendered via a `text/template`.)*
+- [x] **Orientation home (2): a no-arg orient tool.** Replace `workspace_list` with a
       no-param tool (e.g. `workspace_info` / `orient`) returning *this* workspace's
-      `description` + `wellKnownFiles`. Tools are the surface Claude reliably calls, so
-      this is the dependable fallback if `instructions` is ignored (§5.5 still has that
-      unverified). Both homes are intentionally redundant per the §5.5 stance; worst
-      case orientation degrades to `tree_search` + `includeMetadata`.
+      `description` + `wellKnownFiles`. *(Implemented as `workspace_info`. It returns
+      the SAME payload as the initialize `instructions` — an `orientation` field with
+      that exact text plus the structured source fields — so the two are true mirrors.
+      Since the orientation is already embedded in `instructions`, the model is NOT told
+      to "call workspace_info first"; the tool is purely the fallback for hosts that
+      ignore `instructions`.)*
 - **Done when:** a connector points at `/mcp/<name>`, no tool takes a `workspace`
       arg, `workspace_list` is gone, the model is oriented via instructions and/or the
       orient tool, stdio binds one workspace, and cross-workspace isolation (separate
-      `os.Root` per endpoint) still holds in tests.
+      `os.Root` per endpoint) still holds in tests. ✓ *(All green except a pre-existing,
+      unrelated `TestResolveBearerTokensNoneSetIsError` failure.)*
 
 ### 18. Spec conformance — MCP 2025-11-25
 Pick up the revision's relevant deltas. Most of the 2025-11-25 changes don't touch a
