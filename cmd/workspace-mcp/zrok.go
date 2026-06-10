@@ -348,8 +348,12 @@ func serveZrok(cfg *mcp.Config, env map[string]string, handler http.Handler, log
 		os.Exit(0)
 	}()
 
+	endpoints := make([]string, len(shr.FrontendEndpoints))
+	for i, ep := range shr.FrontendEndpoints {
+		endpoints[i] = normalizePublicBase(ep)
+	}
 	log.Slog().Info("starting via zrok",
-		"url", strings.Join(shr.FrontendEndpoints, " "),
+		"url", strings.Join(endpoints, " "),
 		"workspaces", len(cfg.Workspaces))
 	logWorkspaceURLs(log, "zrok", shr.FrontendEndpoints, cfg)
 	err = http.Serve(listener, handler)
@@ -364,10 +368,23 @@ func serveZrok(cfg *mcp.Config, env map[string]string, handler http.Handler, log
 // (zrok can advertise more than one frontend endpoint).
 func logWorkspaceURLs(log *mcp.Logger, via string, bases []string, cfg *mcp.Config) {
 	for _, base := range bases {
-		base = strings.TrimRight(base, "/")
+		base = normalizePublicBase(base)
 		for i := range cfg.Workspaces {
 			name := cfg.Workspaces[i].Name
 			log.Slog().Info("workspace url", "via", via, "workspace", name, "url", base+"/mcp/"+name)
 		}
 	}
+}
+
+// normalizePublicBase trims a trailing slash and ensures the base carries a
+// scheme. ngrok's listener.URL() is already a full https:// URL, but zrok's
+// FrontendEndpoints come back bare (e.g. "myname.share.zrok.io"), so a
+// scheme-less base is assumed to be https — the only scheme a public connector
+// URL uses.
+func normalizePublicBase(base string) string {
+	base = strings.TrimRight(base, "/")
+	if !strings.Contains(base, "://") {
+		base = "https://" + base
+	}
+	return base
 }

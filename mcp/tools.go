@@ -75,7 +75,8 @@ func (s *Server) toolDefs() []Tool {
 				"Use it after locating a file with tree_search. " +
 				"Pass `startLine`/`endLine` to read only a span of a large file (the result reports `totalLines` so you can page through). " +
 				"Large reads are truncated at a byte cap (`truncated` is set; raise `maxBytes` up to the workspace limit). " +
-				"Binary files are flagged and not returned as text by default; set `allowBinary` to receive their raw bytes base64-encoded (with a `mimeType`) so you can parse them yourself.",
+				"Binary files are flagged and not returned as text by default; set `allowBinary` to receive their raw bytes base64-encoded (with a `mimeType`) so you can parse them yourself. " +
+				"The result includes the file's `sha256` (over the full file, even for a ranged or truncated read) — pass it as a later edit's `base_sha256` to guard against the file changing between read and write.",
 			InputSchema: schema(map[string]any{
 				"path":        map[string]any{"type": "string", "description": "Workspace-relative path to the file to read."},
 				"maxBytes":    map[string]any{"type": "integer", "description": "Optional cap on bytes returned (still bounded by the workspace's read limit). If more remains, the result is truncated."},
@@ -146,7 +147,7 @@ func (s *Server) writeToolDefs() []Tool {
 			Description: "Replace the ENTIRE contents of an existing file in this workspace. " +
 				"Use it when a file changes so substantially that quoting an `old_str` would be pointless; for a localized edit prefer file_replace. " +
 				"Fails with NOT_FOUND if the path does not exist (use file_create), so a typo can't silently create a stray file. " +
-				"Pass `base_sha256` (the file's current hash, e.g. from tree_search/file metadata) to reject the write if the file changed since you read it (BASE_SHA_MISMATCH). " +
+				"Pass `base_sha256` (the file's current hash, e.g. the `sha256` returned by file_read) to reject the write if the file changed since you read it (BASE_SHA_MISMATCH). " +
 				"Pass `dry_run: true` to preview the resulting hash without writing. Writes raw bytes with no normalization.",
 			InputSchema: schema(map[string]any{
 				"path":        map[string]any{"type": "string", "description": "Workspace-relative path of the existing file to overwrite."},
@@ -299,7 +300,13 @@ type fileReadResult struct {
 	StartLine  int    `json:"startLine,omitempty"`  // resolved span start (only when a range was requested)
 	EndLine    int    `json:"endLine,omitempty"`    // resolved span end
 	TotalLines int    `json:"totalLines,omitempty"` // total lines in the (scanned) file
-	Notice     string `json:"notice,omitempty"`
+	// SHA256 is the hex SHA-256 of the file's full on-disk bytes (the same hash
+	// base_sha256 checks, §8.3), independent of any line range or maxBytes
+	// truncation — so a read-then-write loop carries it straight into a
+	// file_replace/file_overwrite base_sha256 with no extra round-trip. Empty for
+	// files past the workspace read limit (uneditable, no comparable base hash).
+	SHA256 string `json:"sha256,omitempty"`
+	Notice string `json:"notice,omitempty"`
 }
 
 // Steering notices attached when a result is capped, so the model knows how to
@@ -383,6 +390,14 @@ func (s *Server) fileRead(args json.RawMessage) (any, ToolEvent, error) {
 	binary := bytes.IndexByte(head, 0) >= 0
 
 	res := fileReadResult{Path: clean, Binary: binary}
+	// Hash the file's full on-disk bytes (the base_sha256 guard, §8.3), not the
+	// returned slice: when nothing was truncated, data already is the whole file;
+	// otherwise re-read it through os.Root bounded by the workspace limit.
+	if !readTruncated {
+		res.SHA256 = hashHex(data)
+	} else {
+		res.SHA256 = hashFileFull(ws.Root, clean, ws.Read.MaxBytes)
+	}
 	if binary {
 		if !a.AllowBinary {
 			// Default: flag, don't return content as text — ranges don't apply.

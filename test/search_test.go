@@ -1,8 +1,6 @@
 package test
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -228,75 +226,6 @@ func TestSearchMetadataLargeBody(t *testing.T) {
 	}
 	if len(res.Files) != 1 || res.Files[0].Metadata != "" {
 		t.Fatalf("expected no metadata under a tiny probe, got %+v", res.Files)
-	}
-}
-
-// includeMetadata attaches each returned file's hex SHA-256 (over its full
-// bytes) — the same hash file_replace/file_overwrite check via base_sha256 — so a
-// discovery pass can capture it for a follow-up edit. It is gated by
-// includeMetadata (hashing has a cost) and applies to every returned file, fence
-// or not.
-func TestSearchSHA256(t *testing.T) {
-	r, pol, ig := searchTree(t)
-	hash := func(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:]) }
-
-	// With includeMetadata: every returned file carries its full-bytes hash.
-	res := run(t, r, pol, ig, mcp.SearchRequest{PathGlob: "docs/*.md", IncludeMetadata: true}, 500)
-	byPath := map[string]mcp.FileResult{}
-	for _, f := range res.Files {
-		byPath[f.Path] = f
-	}
-	// guide.md has no frontmatter fence but still gets a hash.
-	guide := byPath["docs/guide.md"]
-	if guide.SHA256 != hash("Use the ASC workflow here.\nAnother line.\n") {
-		t.Fatalf("guide.md sha mismatch: %q", guide.SHA256)
-	}
-	// west.md (with a fence) gets both metadata and a whole-file hash.
-	west := byPath["docs/west.md"]
-	if west.Metadata == "" || west.SHA256 != hash("---\ntitle: West Coast\ntags: [california, drought]\n---\n\nReservoir levels across California fell.\nUnrelated body line.\n") {
-		t.Fatalf("west.md sha/metadata mismatch: %+v", west)
-	}
-
-	// Without includeMetadata: no hash (gated).
-	res = run(t, r, pol, ig, mcp.SearchRequest{PathGlob: "docs/*.md"}, 500)
-	for _, f := range res.Files {
-		if f.SHA256 != "" {
-			t.Errorf("sha256 leaked without includeMetadata on %s: %q", f.Path, f.SHA256)
-		}
-	}
-
-	// A content search (predicate present) also carries the hash when metadata is on.
-	res = run(t, r, pol, ig, mcp.SearchRequest{
-		PathGlob:        "docs/west.md",
-		Where:           []mcp.Predicate{{Text: "Reservoir", FixedString: true}},
-		IncludeMatches:  true,
-		IncludeMetadata: true,
-	}, 500)
-	if len(res.Files) != 1 || res.Files[0].SHA256 == "" {
-		t.Fatalf("content search with includeMetadata should carry a hash: %+v", res.Files)
-	}
-}
-
-// A file larger than the read cap can't be edited in place, so it carries no
-// comparable base hash — the sha256 field is omitted (the file is still listed).
-func TestSearchSHA256OverCap(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "big.md"), []byte(strings.Repeat("A", 200)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	r, err := mcp.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { r.Close() })
-	pol := mcp.NewPolicy([]string{"**/*.md"}, nil)
-	ig := grrep.NewIgnoreSet(dir)
-	res, err := mcp.Search(r, pol, ig, mcp.SearchRequest{IncludeMetadata: true}, 0, 500, 64) // 64-byte cap < 200
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Files) != 1 || res.Files[0].SHA256 != "" {
-		t.Fatalf("over-cap file should be listed without a hash, got %+v", res.Files)
 	}
 }
 

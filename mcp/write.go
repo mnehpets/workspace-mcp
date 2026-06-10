@@ -53,10 +53,29 @@ func (s *Server) writeGate(p string) (string, *toolError) {
 }
 
 // hashHex is the hex SHA-256 used everywhere a content hash is named (base_sha256,
-// the sha256 result field, tree_search's per-file hash, the audit trail).
+// the sha256 result field, file_read's sha256, the audit trail).
 func hashHex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// hashFileFull streams the hex SHA-256 of a file's full bytes through the
+// workspace os.Root, matching what base_sha256 checks (readForHash). It returns
+// "" if the file is unreadable, errors mid-read, or exceeds limit (a file past
+// the editable limit has no comparable base hash — file_replace would reject it
+// with FILE_TOO_LARGE anyway). limit mirrors the workspace read limit.
+func hashFileFull(root *Root, rel string, limit int64) string {
+	f, err := root.Open(rel)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(f, limit+1))
+	if err != nil || n > limit {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // readForHash reads a file's full bytes for hashing/matching, bounded by the
