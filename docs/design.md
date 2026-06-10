@@ -143,8 +143,17 @@ ownership and trust properties (see §2.2). Dependency arrows point one way: the
 ```
 cmd/workspace-mcp/main.go   Wiring + transports. Loads config+secrets, builds the
                      workspace registry, mounts HTTP routes (/healthz, POST/GET
-                     /mcp) or the -stdio loop. The only file that knows about
-                     net/http and process lifecycle.
+                     /mcp) or the -stdio loop, and dispatches the listener: plain
+                     TCP, built-in ngrok (serveNgrok), or built-in zrok
+                     (serveZrok). The only file that knows about net/http and
+                     process lifecycle.
+cmd/workspace-mcp/zrok.go   Built-in zrok tunnel (alternative to ngrok). An
+                     in-memory env_core.Root drives the zrok Go SDK purely from
+                     config+secrets — no ~/.zrok, no ZROK_* ambient state, no
+                     identity file on disk. Reserves a stable share name, reaps
+                     its own leaked ephemeral environments on restart, retries the
+                     controller's transient 500s, releases the share+env on
+                     shutdown. See §6.
 
 mcp/                 Everything except the vendored search core and git layer.
   config.go          Typed YAML load with KnownFields(true) + semantic Validate().
@@ -223,8 +232,9 @@ with its own policy globs, read/grep limits. Parsed into a typed struct with
 ([mcp/config.go]). Validated semantically at startup ([mcp/config.go]):
 ≥ 1 workspace, unique names, a `default` must exist (the conventional endpoint
 `/mcp/default` and the implicit stdio target), each `root` exists and is a directory, globs compile,
-`read.maxBytes` positive, and (HTTP mode only) port in range + resolved bearer
-≥ 32 bytes.
+`read.maxBytes` positive, at most one of `ngrok`/`zrok` enabled (each replaces the
+local listener) with its token present when on, and (HTTP mode only) port in range
+(skipped when a tunnel is active) + resolved bearer ≥ 32 bytes.
 
 ### 4.1 Secrets never live in YAML
 
@@ -252,12 +262,18 @@ the same way and each must be ≥ 32 bytes. See §2.3.
 
 ```yaml
 server:
-  host: 127.0.0.1                 # localhost only; used when ngrok disabled
+  host: 127.0.0.1                 # localhost only; used when no tunnel enabled
   port: 3850
   ngrok:                          # built-in tunnel; host/port ignored when enabled
     enabled: true
     authtoken: { env: NGROK_AUTHTOKEN }
     domain: my-host.ngrok.app     # optional: pin a stable domain
+  zrok:                           # alternative built-in tunnel (enable at most one of ngrok/zrok)
+    enabled: false
+    enableToken: { env: ZROK_ENABLE_TOKEN }   # zrok account token; secrets only, never YAML
+    apiEndpoint: https://api-v2.zrok.io       # optional; this is the default
+    frontend: public              # optional public frontend namespace (default)
+    uniqueName: my-workspace-mcp  # optional reserved name → stable URL across restarts
 auth:
   bearerToken: { env: MCP_BEARER_TOKEN }
   oauth:                          # OAuth 2.0 authorization code flow (required by claude.ai)
@@ -596,13 +612,33 @@ treat a partial result as complete.
   — a known shim to be replaced by a transport-agnostic `jsonrpc` dispatch entry
   point later ([cmd/workspace-mcp/main.go:147]). Note claude.ai itself only connects to
   *remote* MCP servers, so stdio is never the claude.ai path.
-- **Exposure.** With `server.ngrok.enabled: false` (default) the server binds
-  `127.0.0.1:PORT` and an external reverse proxy or ngrok process fronts it. With
-  `server.ngrok.enabled: true` the server dials ngrok directly via the Go SDK —
-  no external process or `ngrok.yml` needed. claude.ai reaches it as a custom
-  connector / remote MCP, authenticating via the OAuth 2.0 authorization code flow
-  (`GET /oauth/authorize` → approve page → `POST /oauth/token` → AEAD access +
-  refresh token pair; the refresh token buys a new pair without re-approval).
+- **Exposure.** With no tunnel enabled (default) the server binds `127.0.0.1:PORT`
+  and an external reverse proxy or `ngrok`/`zrok` process fronts it. Two built-in
+  tunnels can replace that listener — **enable at most one**, since each takes over
+  the listener; validation rejects both:
+  - **ngrok** (`server.ngrok.enabled`): the server dials ngrok directly via the Go
+    SDK — no external process or `ngrok.yml`. Reserve a `domain` for a stable URL.
+  - **zrok** (`server.zrok.enabled`, [cmd/workspace-mcp/zrok.go]): an OpenZiti-based
+    alternative driven entirely from config+secrets. The crux is that the zrok SDK
+    normally loads an *enabled* environment from `~/.zrok` (or `ZROK_*` env); we
+    deliberately bypass that with an in-memory `env_core.Root` built from the
+    resolved `enableToken`+`apiEndpoint`, so the server stays self-contained and
+    reproducible — same posture as ngrok taking its authtoken from a SecretRef. At
+    startup it reserves the configured `uniqueName` in the frontend namespace (the
+    reserved *name*, not the environment, is what keeps the URL stable across
+    restarts), enables an *ephemeral* environment + public proxy share, and serves
+    over an in-memory ziti listener (the identity never touches disk). On clean
+    shutdown the share and environment are released; an unclean exit is self-healed
+    on the next start by reaping the prior `env-<uniqueName>` environment, and the
+    controller's occasional transient 500 on share creation is retried. The public
+    per-workspace URLs (`<frontend>/mcp/<name>`) are logged at startup, as with ngrok.
+
+  Either way claude.ai reaches the server as a custom connector / remote MCP,
+  authenticating via the OAuth 2.0 authorization code flow (`GET /oauth/authorize`
+  → approve page → `POST /oauth/token` → AEAD access + refresh token pair; the
+  refresh token buys a new pair without re-approval). The tunnel only replaces the
+  listener — the bearer/OAuth, per-workspace policy, and `os.Root` boundary are
+  unchanged.
 
 ---
 

@@ -189,6 +189,57 @@ Reserve a domain in the ngrok dashboard so the URL is stable across restarts.
 With `server.ngrok.enabled: true` the `server.host`/`server.port` fields are
 unused — the server does not bind a local TCP port.
 
+## Expose with zrok
+
+zrok is a self-hostable alternative to ngrok, built on OpenZiti. The server has
+a **built-in zrok** client — no external `zrok` process and no `zrok
+enable` state on this machine. Everything is driven from `config.yaml` + secrets;
+the SDK never reads `~/.zrok` or `ZROK_*` ambient env vars. Enable **at most one**
+of ngrok/zrok — each replaces the local TCP listener. If you enable both ngrok
+and zrok, you'll give the AI model full sentience and start the singularity.
+
+```yaml
+server:
+  zrok:
+    enabled: true
+    enableToken:
+      env: ZROK_ENABLE_TOKEN          # in secrets.env
+    apiEndpoint: https://api-v2.zrok.io   # optional; this is the default
+    frontend: public                  # optional public frontend namespace (default)
+    uniqueName: my-workspace-mcp      # reserve a stable share name (see below)
+```
+
+Add `ZROK_ENABLE_TOKEN` to `secrets.env` — this is your zrok account's
+token (from the zrok web console select your user account, and look for
+the "Account Token"). On startup the server creates an *ephemeral* zrok
+environment, opens a public proxy share, and logs the public URL:
+
+```
+INFO starting via zrok url=https://my-workspace-mcp.shares.zrok.io workspaces=1
+```
+
+### Reserve a stable name (important)
+
+**Set `uniqueName`, or your URL changes on every restart** — and since the
+connector URL is baked into every claude.ai (and other client) registration, a
+changing URL means re-registering each connector each time.
+
+Without `uniqueName` you get a fresh random URL (e.g.
+`https://xxr2b7tzfx64.shares.zrok.io`) every start — the same tradeoff as ngrok
+without a reserved domain. With `server.zrok.enabled: true` the
+`server.host`/`server.port` fields are unused.
+
+> Each start creates a fresh *ephemeral* zrok environment and releases it on a
+> clean shutdown (Ctrl-C / SIGTERM). An unclean exit (`kill -9`, crash) can leave
+> one behind, and zrok's free tier caps concurrent environments — so leaked
+> environments eventually make share creation fail with an opaque `500`. When a
+> stable `uniqueName` is set, the server **self-heals**: on startup it reaps any
+> environment this same name left over (`env-<uniqueName>`) before enabling a new
+> one, so "last start wins" and a hard-killed predecessor cleans itself up next
+> run. The reserved name itself is never touched. (Environments leaked under a
+> *different* `uniqueName`, or before you set one, still need a one-time prune in
+> the zrok web console.)
+
 ## Add to claude.ai
 
 In claude.ai → **Settings → Connectors → Add custom connector**.

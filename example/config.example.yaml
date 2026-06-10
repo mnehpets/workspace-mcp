@@ -15,6 +15,22 @@ server:
   #     env: NGROK_AUTHTOKEN        # resolved from secrets.env / OS env
   #   domain: my-reserved-host.ngrok.app   # optional: pin a reserved domain
 
+  # Built-in zrok tunnel — an alternative to ngrok (enable at most one of the
+  # two). When enabled, the server enables an ephemeral zrok environment via
+  # the zrok Go SDK, opens a public proxy share, and serves over it — no
+  # external `zrok` process and no `zrok enable` state on this machine. Driven
+  # entirely from this config + secrets (never ~/.zrok or ZROK_* env vars).
+  # The public URL is logged at startup; the share and environment are
+  # released on clean shutdown (SIGINT/SIGTERM), so an unclean exit can leave
+  # a stale environment to prune in the zrok web console.
+  # zrok:
+  #   enabled: true
+  #   enableToken:
+  #     env: ZROK_ENABLE_TOKEN      # zrok account token, from secrets.env / OS env
+  #   apiEndpoint: https://api-v2.zrok.io   # optional; this is the default
+  #   frontend: public              # optional public frontend namespace (default)
+  #   uniqueName: my-workspace-mcp  # optional: stable share name → stable URL across restarts
+
   # Origin-header allowlist (Streamable-HTTP DNS-rebinding defense, MCP 2025-11-25).
   # A request whose Origin header is PRESENT but not listed is rejected with 403.
   # Requests with no Origin header (non-browser clients — the normal case for MCP

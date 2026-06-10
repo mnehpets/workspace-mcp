@@ -322,7 +322,7 @@ dropped (file paths already convey structure). See §8.4.
 ### 8.3 `file_read`
 Read one allowed file, optionally a line range. `{ "workspace": "default",
 "path": "docs/x.md", "maxBytes": 100000, "startLine": 1, "endLine": 100 }` →
-`{ "path", "content", "truncated", "binary", "startLine", "endLine", "totalLines" }`.
+`{ "path", "content", "truncated", "binary", "startLine", "endLine", "totalLines", "sha256" }`.
 Opens via `Root.Open`; enforces the workspace's `read.maxBytes`; detects binary and
 flags or refuses it.
 - **`startLine` / `endLine`** (optional, 1-based, inclusive) — return only that
@@ -331,6 +331,14 @@ flags or refuses it.
   `totalLines` so the model can page (e.g. request the next 100). `maxBytes` still
   caps the *returned* span. Line ranges apply to text only; a binary file is
   flagged/refused as today regardless of range. See task §12.13.
+- **`sha256`** — the hex SHA-256 of the file's **full** bytes (the same hash
+  `base_sha256` checks, §8.7.4), independent of any line range or `maxBytes`
+  truncation. This is the logical place to capture the hash: a read-then-write loop
+  reads the file, carries its `sha256` straight into a subsequent
+  `file_replace`/`file_overwrite` `base_sha256`, and gets the optimistic-concurrency
+  guard with no extra round-trip. Computed over the whole file even when only a span
+  is returned, so the guard covers the real on-disk state, not the slice. Binary
+  files still report `sha256` (the hash is over bytes, not text).
 
 ### 8.4 `tree_search` (content search needs the workspace's `grep.enabled`)
 One tool to locate files — by path and by content — replacing the former
@@ -341,8 +349,8 @@ Returns a flat file list; the caller chooses whether to hydrate matched lines pe
 `{ "workspace": "default", "path": "docs/**/*.md",
    "where": [ { "text": "ASC workflow", "fixedString": true } ],
    "includeMatches": true }`
-→ `{ "files": [{ "path", "matches"?, "metadataMatches"?, "metadata"?, "sha256"? }], "truncated" }`
-(`matches`/`metadataMatches` are each a list of `{ "line","text" }`; `metadata` and `sha256` are strings).
+→ `{ "files": [{ "path", "matches"?, "metadataMatches"?, "metadata"? }], "truncated" }`
+(`matches`/`metadataMatches` are each a list of `{ "line","text" }`; `metadata` is a string).
 - **`path`** — a glob selecting candidate files (boundary *and* name filter in one;
   e.g. `docs/**/*.{md,txt}`). Omit for the whole tree. Fuzzy name matching was
   considered and dropped: an LLM globs broad then narrows by inspecting results, so
@@ -362,11 +370,10 @@ Returns a flat file list; the caller chooses whether to hydrate matched lines pe
 - **`includeMetadata`** (default off) — attach each file's frontmatter block as **raw,
   unparsed text** (the bytes between the leading fences) in `metadata`. The caller parses
   it if it cares; the server hands over bytes, never a typed/queryable schema. No-op on
-  files without a fence. **Also attaches `sha256`** — the hex SHA-256 of each returned
-  file's full bytes (the same hash `base_sha256` checks, §8.7.4) — so a discovery pass can
-  capture the hash to pass straight into a subsequent `file_replace`/`file_overwrite` with
-  no extra read. Gated by `includeMetadata` because hashing every match has a real cost;
-  it applies to every returned file, fence or not. See task §12.11 (write surface).
+  files without a fence. (Per-file hashing is **not** done here — `sha256` lives on
+  `file_read`, §8.3, the natural read-then-write capture point; `tree_search` is a
+  locator, not a content-hasher, and hashing every match would cost a full-file read per
+  hit that the search itself doesn't need.)
 - Field-scoped *predicates* (matching within a named field) stay out of scope — see §3.
   The server finds the fence; it never parses or queries the YAML inside it.
 Backed by the vendored grrep core (§6): `fastwalk` traversal filtered by `IgnoreSet` +
@@ -630,14 +637,6 @@ build checklist.
 - [x] **Tests** (`test/write_test.go`): each op's success + each structured rejection,
       no-normalization (trailing newline/CRLF preserved), cross-workspace isolation,
       and tools/list visibility on/off.
-- [x] **`tree_search` exposes `sha256` (companion).** When `includeMetadata` is set,
-      attach each returned file's hex SHA-256 (`crypto/sha256` over its full bytes,
-      read through `os.Root`) as a `sha256` field (§8.4) — the *same* hash
-      `base_sha256` checks. Lets a discovery pass capture hashes to feed straight into
-      `file_replace`/`file_overwrite` without a separate `file_read`. Gated by
-      `includeMetadata` because hashing every match has real cost; applies to every
-      returned file (fence or not). Extend `mcp/search.go` (per-file hash during the
-      walk) and `test/search_test.go`. Independent of `write.enabled` — it is a read.
 - **Done when:** the three ops apply deterministically through `os.Root`+policy,
   every structured rejection is returned with its distinct code, a write-disabled
   workspace exposes no write tool, and changes are reviewable/reversible via Git.
@@ -820,10 +819,10 @@ quality):
 - [ ] **Frontmatter vs body distinction.** Ask "which notes are *tagged* california"
       (vs merely mention it); confirm the model reads `metadataMatches` separately from
       body `matches` and doesn't conflate a declared tag with an incidental mention.
-- [ ] **`sha256` capture for a later write.** Confirm the model can run a
-      `tree_search` `includeMetadata` pass to capture a file's `sha256` and carry it
-      into a subsequent `file_replace`/`file_overwrite` `base_sha256` without a
-      separate `file_read`.
+- [ ] **`sha256` capture for a later write.** Confirm the model carries the `sha256`
+      returned by a `file_read` straight into a subsequent
+      `file_replace`/`file_overwrite` `base_sha256`, getting the optimistic-concurrency
+      guard without a separate hash pass.
 - [ ] **Policy-denied / not-found handling.** Ask it to read a blocked path (`.env`, a
       key) or a missing file; confirm it reports the `POLICY_DENIED`/`NOT_FOUND`
       gracefully and doesn't loop retrying or try to escape via `..`.
@@ -887,6 +886,97 @@ return file content, so the path arg gates exactly like a read.
   steering notice, and returns `NOT_A_GIT_REPO` off a git repo — no `git` binary, no
   mutation. Composes with `git_status` (list changed → diff them) and ranged
   `file_read`.
+
+### 22. Relocate `sha256` from `tree_search` to `file_read`
+Move the optimistic-concurrency hash off the locator and onto the reader. `sha256`
+was attached to `tree_search` results under `includeMetadata` (the old §12.11
+companion item), but a search is a *locator* and hashing every hit forces a full-file
+read the walk doesn't otherwise need. `file_read` is the logical home: the
+read-then-write loop already reads the file, so it can carry the file's hash straight
+into a subsequent `file_replace`/`file_overwrite` `base_sha256` with no extra
+round-trip. Design updated in §8.3 / §8.4.
+- [ ] **Remove from `tree_search`** ([mcp/search.go]): drop the per-file hashing and
+      the `sha256` field from the returned file shape; the `includeMetadata` gate now
+      attaches only the frontmatter `metadata` block. Update `test/search_test.go`.
+- [ ] **Add to `file_read`** ([mcp/tools.go]): attach the hex SHA-256 of the file's
+      **full** bytes (`crypto/sha256`, read through `os.Root`) as a `sha256` field on
+      every `file_read` response (§8.3) — the *same* hash `base_sha256` checks.
+      Computed over the whole file even for a ranged read (`startLine`/`endLine`) or a
+      `maxBytes`-truncated one, so the guard covers the real on-disk state, not the
+      returned slice. Binary files report it too (hash is over bytes). Independent of
+      `write.enabled` — it is a read.
+- [ ] **Tests** ([test/fileread_*_test.go]): `sha256` present and equals the file's
+      real hash; stable across a ranged/truncated read of the same file; round-trips
+      into a `file_replace`/`file_overwrite` `base_sha256` (matches → write, drift →
+      `BASE_SHA_MISMATCH`).
+- **Done when:** `tree_search` no longer returns `sha256`, every `file_read` returns
+  the full-file `sha256`, and the captured hash feeds a write's `base_sha256` guard
+  without a separate hash pass.
+
+### 23. Built-in zrok tunnel (config-driven, not ambient zrok env)
+Add zrok as a second built-in tunnel option beside ngrok (§ config `server.ngrok`),
+using the zrok **Go SDK** in-process — no external `zrok` process, no `zrok.yml`. The
+non-negotiable constraint: drive the SDK **entirely from our `config.yaml` + secret
+refs**, *not* from zrok's ambient environment. The SDK's default path loads an
+enabled environment from `~/.zrok` (or `ZROK_*` env vars); we deliberately bypass
+that and construct the zrok root/share from values we resolve ourselves, so the
+server is self-contained and reproducible (same posture as the ngrok integration,
+which takes its authtoken from a `{ env: … }` SecretRef, not ngrok's own config).
+- [x] **Config shape** ([mcp/config.go]): add `server.zrok` mirroring `NgrokConfig`
+      — `enabled: bool`, an `enableToken` **SecretRef** (the zrok account/enable
+      token, resolved via `.env`/OS env like `ngrok.authtoken`), an optional
+      `apiEndpoint` (default zrok.io), and a share target (`shareMode`/`backendMode`
+      and optional reserved `uniqueName`/`frontend`). Add a `ResolveZrokEnableToken`
+      resolver beside `ResolveNgrokAuthtoken`. Validation: exactly one of
+      `ngrok.enabled` / `zrok.enabled` may be true (they both replace the local TCP
+      listener); `enableToken` required when `zrok.enabled`.
+- [x] **Construct the root from config, not disk** ([cmd/workspace-mcp/main.go], new
+      `serveZrok` beside `serveNgrok`): build the zrok environment `*Root` from the
+      resolved `enableToken` + `apiEndpoint` in memory rather than calling the SDK's
+      `environment.LoadRoot()` (which reads `~/.zrok`). This is the crux of the task —
+      if the SDK only supports a disk-loaded root, wrap/populate an in-memory root from
+      our values; do **not** fall back to ambient `ZROK_*` env or a `~/.zrok` file.
+- [x] **Create the share + serve** : open a zrok share (proxy/HTTP backend) for the
+      handler, log the resulting public URL at startup (like ngrok's
+      `listener.URL()`), and `http.Serve` over the share's listener. Ensure clean
+      shutdown releases the share (especially ephemeral shares) so we don't leak
+      reservations.
+- [x] **Config example + docs**: add a commented `server.zrok` block to
+      `example/config.example.yaml` and `config.local.yaml`, and a
+      `ZROK_ENABLE_TOKEN` line to `example/secrets.example.env`. Note the
+      one-tunnel-at-a-time rule and that the token comes from secrets, never the YAML.
+- [x] **Tests** ([test/zrok_config_test.go]): zrok config parses;
+      `ResolveZrokEnableToken` resolves from env, errors when unset, and is empty
+      when disabled; both-tunnels-enabled and missing-enableToken configs are
+      rejected. (The live tunnel dial itself stays a manual/pre-flight check, like
+      ngrok.)
+- **Done when:** `server.zrok.enabled: true` with an `enableToken` secret ref brings
+  up an in-process zrok tunnel whose URL is logged at startup, the SDK is fed solely
+  from our config (no `~/.zrok` / `ZROK_*` ambient dependency), ngrok and zrok are
+  mutually exclusive, and the auth/policy/`os.Root` boundary is unchanged (the tunnel
+  only replaces the listener).
+- **Status (2026-06-10, written via the web connector — not yet compiled):**
+  implemented against zrok SDK **v2** (`github.com/openziti/zrok/v2@v2.0.4`, latest
+  tag). `env_core.Root` turned out to be an *interface*, so [cmd/workspace-mcp/zrok.go]
+  implements an in-memory `zrokRoot` (the SDK calls we use only exercise `Client()`,
+  `Environment()`, `IsEnabled()`; disk-flavored methods are stubbed). An *ephemeral*
+  environment is enabled at startup and disabled on shutdown (SIGINT/SIGTERM handler;
+  share deleted then environment disabled, `sync.Once`-guarded). `sdk.NewListener`
+  insists on a ziti identity *file*, but `ziti.NewConfigFromFile` is just
+  ReadFile+Unmarshal, so we inline `json.Unmarshal` + `ziti.NewContext` and the key
+  never touches disk. **v2 API drift vs this plan:** the REST share request dropped
+  `Reserved`/`UniqueName`; stable names are now `NameSelections` (`namespace:name`),
+  so config `frontend`/`uniqueName` map there, and `shareMode`/`backendMode` are
+  deliberately fixed at public/proxy (anything else defeats the purpose).
+- **Status (2026-06-10, finished in Claude Code):** `go get ...@v2.0.4 && go mod
+  tidy && go build ./...` all clean — the hand-verified v2.0.4 code compiles as
+  written (no API drift beyond the NameSelections change already noted). `go vet`
+  and the full `go test ./...` pass. Added the `ZROK_ENABLE_TOKEN` line to
+  `example/secrets.example.env`, the commented `server.zrok` block to
+  `config.local.yaml`, and [test/zrok_config_test.go] (parse + resolver +
+  validation). The compiled `cmd/workspace-mcp/workspace-mcp` binary is now
+  gitignored. **Task complete** — the live tunnel dial remains a manual pre-flight
+  check (needs a real zrok account token), as with ngrok.
 
 ---
 
