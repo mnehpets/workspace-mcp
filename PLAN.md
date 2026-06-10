@@ -763,6 +763,58 @@ return file content, so the path arg gates exactly like a read.
   mutation. Composes with `git_status` (list changed → diff them) and ranged
   `file_read`.
 
+### 22. Suspected bug — oversize tool-call request bodies die opaquely (decode-layer field limit)
+Observed 2026-06-10, live claude.ai session over zrok: a `file_create` whose
+`contents` was ~17–18 KB failed twice, deterministically, with claude.ai's generic
+"Error occurred during tool execution" — no structured tool error (no `PATH_EXISTS`
+/ `FILE_TOO_LARGE` / anything from §13) ever reached the client. A 67-byte create
+succeeded immediately afterwards, and the same document then landed fine as ~4–6 KB
+`file_replace` chunks. Size-correlated and repeatable, not transient; the failure
+happens *before* any tool handler runs, which points at the request-decode layer,
+not this server's domain logic.
+
+**Prime suspect:** the max-field limit in `github.com/mnehpets/http`
+`endpoint/decode.go` (pinned at v0.6.0 in `go.mod`) rejecting the oversized JSON
+string field in the `tools/call` params. A ~16 KiB-ish cap fits every observation
+(67 B ok, 4–6 KB ok, 17–18 KB fail). Not yet confirmed against the library source.
+
+This matters beyond annoyance: the write tools are *designed* to carry whole-file
+`contents` (`file_overwrite` is documented up to the read/write ceiling, §8.7), so
+the effective request ceiling silently being ~16 KiB contradicts the tool contract,
+and the opaque failure gives the model nothing to adapt to (the chunked
+`file_replace` workaround was found by trial and error).
+
+- [ ] **Reproduce + isolate the layer.** Check the server audit log for the two
+      failing requests (did they arrive at all?). Then curl a `tools/call` with a
+      >17 KB string param at the local listener directly, and again through zrok —
+      separates endpoint-layer rejection from tunnel/client limits.
+- [ ] **Confirm the limit** in `mnehpets/http` `endpoint/decode.go` @ v0.6.0:
+      which constant, per-field or whole-body, and what HTTP status/body it
+      produces on violation (that response shape is why claude.ai showed a generic
+      error).
+- [ ] **Fix the ceiling.** The MCP JSON-RPC endpoint must accept request bodies
+      sized for legitimate write payloads: at least the per-workspace write/read
+      ceiling (`read.maxBytes`) *plus* JSON-escaping overhead (escaped content can
+      approach ~2× raw in the worst case) plus envelope slack. Either bump/expose
+      the limit per-endpoint in `mnehpets/http` and upgrade the pin, or configure
+      it where the endpoint is built in [mcp/handler.go]. Keep *some* cap — it is
+      a sane DoS guard — just sized to the contract, not 16 KiB.
+- [ ] **Error shape.** An over-limit request must surface as a structured,
+      model-readable error (HTTP 413 with a JSON-RPC error body, or an in-band
+      `REQUEST_TOO_LARGE` tool error naming the limit and suggesting chunked
+      `file_replace`), never an opaque transport failure. Add the chosen code to
+      §13 once decided.
+- [ ] **Test.** Integration test POSTing `tools/call` requests bracketing the
+      limit: a write payload at the documented ceiling succeeds; one beyond it
+      fails with the structured error, not a connection-level death.
+- [ ] **Tool-description hint (optional).** If a hard ceiling remains, say so in
+      the write tools' descriptions ("for content larger than ~N, build the file
+      in `file_replace` chunks") so models route around it without a failed call.
+- **Done when:** a single-shot `file_create`/`file_overwrite` up to the configured
+  write ceiling succeeds end-to-end through claude.ai + zrok, an over-limit
+  request returns the documented structured error, and the limit + error code are
+  recorded in §13.
+
 ---
 
 ## 13. Failure modes & error spec
@@ -789,6 +841,11 @@ return file content, so the path arg gates exactly like a read.
   file's actual hash ("re-read and retry"); no write.
 - **Write target exceeds `read.maxBytes`** (file too large to read-modify-write
   safely) → `FILE_TOO_LARGE`; no partial write.
+- **Oversize request body** — KNOWN GAP (task 22): a `tools/call` whose JSON body
+  exceeds the endpoint decode limit (suspected ~16 KiB max-field cap in
+  `mnehpets/http` `endpoint/decode.go`) currently dies *before* the handler with no
+  structured error reaching the client. To be specced (e.g. `REQUEST_TOO_LARGE` or
+  HTTP 413 + JSON-RPC error) and fixed in task 22.
 
 ---
 
