@@ -895,19 +895,23 @@ read the walk doesn't otherwise need. `file_read` is the logical home: the
 read-then-write loop already reads the file, so it can carry the file's hash straight
 into a subsequent `file_replace`/`file_overwrite` `base_sha256` with no extra
 round-trip. Design updated in §8.3 / §8.4.
-- [ ] **Remove from `tree_search`** ([mcp/search.go]): drop the per-file hashing and
+- [x] **Remove from `tree_search`** ([mcp/search.go]): drop the per-file hashing and
       the `sha256` field from the returned file shape; the `includeMetadata` gate now
       attaches only the frontmatter `metadata` block. Update `test/search_test.go`.
-- [ ] **Add to `file_read`** ([mcp/tools.go]): attach the hex SHA-256 of the file's
+      *(`hashFileFull` moved to [mcp/write.go] beside the other hash helpers; the two
+      `TestSearchSHA256*` cases removed.)*
+- [x] **Add to `file_read`** ([mcp/tools.go]): attach the hex SHA-256 of the file's
       **full** bytes (`crypto/sha256`, read through `os.Root`) as a `sha256` field on
       every `file_read` response (§8.3) — the *same* hash `base_sha256` checks.
       Computed over the whole file even for a ranged read (`startLine`/`endLine`) or a
       `maxBytes`-truncated one, so the guard covers the real on-disk state, not the
       returned slice. Binary files report it too (hash is over bytes). Independent of
-      `write.enabled` — it is a read.
-- [ ] **Tests** ([test/fileread_*_test.go]): `sha256` present and equals the file's
+      `write.enabled` — it is a read. *(When nothing was truncated `data` already is the
+      whole file, so it's hashed directly; otherwise re-read via `hashFileFull` bounded
+      by `read.maxBytes` — empty for a file past the cap, which is uneditable anyway.)*
+- [x] **Tests** ([test/fileread_sha256_test.go]): `sha256` present and equals the file's
       real hash; stable across a ranged/truncated read of the same file; round-trips
-      into a `file_replace`/`file_overwrite` `base_sha256` (matches → write, drift →
+      into a `file_replace` `base_sha256` (matches → write, drift →
       `BASE_SHA_MISMATCH`).
 - **Done when:** `tree_search` no longer returns `sha256`, every `file_read` returns
   the full-file `sha256`, and the captured hash feeds a write's `base_sha256` guard

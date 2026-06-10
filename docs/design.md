@@ -389,8 +389,8 @@ Read one allowed file, optionally a line span.
   `startLine`/`endLine` (1-based inclusive, either omittable → open-ended),
   `allowBinary` (bool)
 - **out** `{ "path": string, "content": string, "truncated": bool, "binary": bool,
-  "encoding"?: "base64", "mimeType"?: string, "startLine"?: int, "endLine"?: int,
-  "totalLines"?: int, "notice"?: string }`
+  "sha256": string, "encoding"?: "base64", "mimeType"?: string, "startLine"?: int,
+  "endLine"?: int, "totalLines"?: int, "notice"?: string }`
 - Opens via `os.Root`; binary detected by a NUL probe over the first 8 KB. By
   default a binary file is flagged (`binary: true`, no `content`, regardless of any
   range); with `allowBinary` its raw bytes are returned base64-encoded
@@ -400,7 +400,13 @@ Read one allowed file, optionally a line span.
   plus a steering `notice` (§5.5). With a range, the scan is bounded by
   `read.maxBytes`, the returned span is then capped by the arg `maxBytes`, and the
   line fields echo the resolved span + `totalLines` so the model can page;
-  out-of-bounds ranges clamp, bad bounds → `INVALID_RANGE`. ([mcp/tools.go])
+  out-of-bounds ranges clamp, bad bounds → `INVALID_RANGE`. Every response carries
+  `sha256` — the hex SHA-256 of the file's **full** bytes (the *same* hash
+  `base_sha256` checks), computed over the whole file even for a ranged or
+  `maxBytes`-truncated read, so a read-then-write loop carries it straight into a
+  later `file_replace`/`file_overwrite` `base_sha256` with no extra round-trip
+  (binary files report it too; empty for a file past `read.maxBytes`, which is
+  uneditable anyway). ([mcp/tools.go])
 
 #### `tree_search`
 One tool to locate *and browse* files — by path, by content, or both — replacing
@@ -505,7 +511,7 @@ commits, pushes, deletes, moves, or renames. ([mcp/write.go])
   bounded by `read.maxBytes` (larger → `FILE_TOO_LARGE`, never a partial replace).
 
 **Cross-cutting guards.** `base_sha256` (optional hex sha256 of the file's current
-full bytes — the *same* hash `tree_search`'s `includeMetadata` returns) is the
+full bytes — the *same* hash `file_read` returns as `sha256`) is the
 optimistic-concurrency guard against the read-then-write race (the tree syncs from
 GitHub out of band); on mismatch → `BASE_SHA_MISMATCH` returning the actual hash.
 `dry_run` on overwrite/replace returns the count + resulting hash without writing,
