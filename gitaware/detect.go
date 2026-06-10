@@ -1,7 +1,10 @@
 // Package gitaware adds read-only, git-aware operations to workspaces whose tree
-// is a Git repository, using pure-Go go-git (no git binary). It produces
-// metadata only (status, tracked files); it never serves file content, so it is
-// outside the os.Root content boundary by design.
+// is a Git repository, using pure-Go go-git (no git binary). Most operations
+// produce metadata only (status, tracked files). The exception is Diff, which
+// emits file content as a unified diff: its blob bytes come from go-git's object
+// store, and its worktree bytes are read through an injected WorktreeReader that
+// the mcp layer backs with the workspace os.Root — gitaware never opens worktree
+// files itself, keeping content reads inside the os.Root boundary.
 package gitaware
 
 import (

@@ -93,7 +93,7 @@ func TestToolsListInvariant(t *testing.T) {
 
 	want := map[string]bool{
 		"workspace_info": true, "file_read": true,
-		"tree_search": true, "git_status": true,
+		"tree_search": true, "git_status": true, "git_diff": true,
 	}
 	got := map[string]bool{}
 	for _, tool := range res.Tools {

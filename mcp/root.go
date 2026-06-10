@@ -93,6 +93,17 @@ func (r *Root) Stat(rel string) (os.FileInfo, error) {
 	return r.root.Stat(filepath.FromSlash(clean))
 }
 
+// Lstat stats a path through the sandbox without following a terminal symlink,
+// so a symlink is reported as one (ModeSymlink) rather than resolved. Used by
+// git_diff to skip symlinks instead of diffing their targets.
+func (r *Root) Lstat(rel string) (os.FileInfo, error) {
+	clean, err := Clean(rel)
+	if err != nil {
+		return nil, err
+	}
+	return r.root.Lstat(filepath.FromSlash(clean))
+}
+
 // ReadDir lists directory entries through the sandbox.
 func (r *Root) ReadDir(rel string) ([]fs.DirEntry, error) {
 	clean, err := Clean(rel)

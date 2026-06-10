@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 
@@ -117,6 +118,20 @@ func (s *Server) toolDefs() []Tool {
 				"Orientation only: it neither reads file contents nor modifies anything. No parameters.",
 			InputSchema: schema(map[string]any{}),
 			Annotations: readOnlyAnnotations("Git status"),
+		},
+		{
+			Name: "git_diff",
+			Description: "Show the working-tree diff — what actually changed, as a standard unified diff — when this workspace is a git repository (otherwise NOT_A_GIT_REPO). " +
+				"Read-only. The natural companion to git_status: status lists changed paths, git_diff shows their content changes. " +
+				"By default diffs the worktree against the index (like `git diff`), with untracked files included as all-new; `staged: true` diffs the index against HEAD (like `git diff --cached`). " +
+				"Pass `path` (a file, or a directory prefix to scope to a subtree) to diff only that — do this when the whole-tree diff comes back truncated. " +
+				"Returns a `files` summary (per-file change kind and +/- line counts; always complete even when the diff text is truncated) and `diff`, the unified diff text. " +
+				"Binary files, symlinks, and files over the read limit are listed but their content is skipped. Renames are not detected (they appear as a delete plus an add).",
+			InputSchema: schema(map[string]any{
+				"path":   map[string]any{"type": "string", "description": "Optional workspace-relative file or directory prefix to scope the diff. Omit for the whole worktree. Policy-gated like any read: a blocked path returns POLICY_DENIED."},
+				"staged": map[string]any{"type": "boolean", "description": "Diff the index against HEAD (`git diff --cached`) instead of the worktree against the index (default false)."},
+			}),
+			Annotations: readOnlyAnnotations("Git diff"),
 		},
 	}
 	if s.ws.Write.Enabled {
@@ -578,4 +593,192 @@ func (s *Server) gitStatus(_ json.RawMessage) (any, ToolEvent, error) {
 	}
 	ev.Matches = len(st.Files)
 	return st, ev, nil
+}
+
+// --- git_diff ---
+
+type gitDiffArgs struct {
+	Path   string `json:"path"`
+	Staged bool   `json:"staged"`
+}
+
+// gitDiffFileSummary is one file's metadata in the envelope. It is always
+// complete (cheap), even when the `diff` text is truncated, so the model can
+// re-scope to a single path.
+type gitDiffFileSummary struct {
+	Path      string `json:"path"`
+	Change    string `json:"change"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+	Binary    bool   `json:"binary,omitempty"`
+	TooLarge  bool   `json:"tooLarge,omitempty"`
+	Symlink   bool   `json:"symlink,omitempty"`
+}
+
+type gitDiffResult struct {
+	Files     []gitDiffFileSummary `json:"files"`
+	Diff      string               `json:"diff"`
+	Truncated bool                 `json:"truncated"`
+	Notice    string               `json:"notice,omitempty"`
+}
+
+const diffTruncatedNotice = "diff truncated at the read limit — re-run scoped to a single path (the files list is complete)"
+
+// rootWorktreeReader backs gitaware's WorktreeReader with the workspace os.Root,
+// so every worktree byte read for a diff crosses the same symlink-/TOCTOU-safe
+// boundary as file_read. It caps each read at max+1 bytes; gitaware treats a
+// result longer than the limit as TooLarge, so no unbounded file is buffered.
+type rootWorktreeReader struct {
+	root *Root
+	max  int64
+}
+
+func (r rootWorktreeReader) ReadFile(rel string) ([]byte, os.FileMode, bool, error) {
+	info, err := r.root.Lstat(rel)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, info.Mode(), true, nil
+	}
+	f, err := r.root.Open(rel)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer f.Close()
+	limit := r.max + 1
+	if limit <= 1 {
+		limit = 1 << 62 // no workspace cap configured; read fully
+	}
+	data := make([]byte, limit)
+	n, err := io.ReadFull(f, data)
+	switch err {
+	case nil, io.EOF, io.ErrUnexpectedEOF:
+	default:
+		return nil, 0, false, err
+	}
+	return data[:n], info.Mode(), false, nil
+}
+
+func (s *Server) gitDiff(args json.RawMessage) (any, ToolEvent, error) {
+	var a gitDiffArgs
+	ev := ToolEvent{}
+	if err := unmarshalArgs(args, &a); err != nil {
+		return nil, ev, err
+	}
+	ws := s.ws
+	if !ws.IsGitRepo {
+		return nil, ev, newToolError("NOT_A_GIT_REPO", "workspace is not a git repository")
+	}
+
+	scope := "" // "" = whole worktree
+	scoped := false
+	if strings.TrimSpace(a.Path) != "" {
+		clean, err := Clean(a.Path)
+		if err != nil {
+			return nil, ev, mapPathError(err)
+		}
+		// Denied wins over existence, so a blocked path never leaks its presence.
+		if d := ws.Policy.CheckFile(clean); !d.Allowed {
+			return nil, ev, mapPolicyDenied(d.Reason)
+		}
+		scope = clean
+		scoped = true
+		ev.Paths = []string{clean}
+	}
+
+	// Per-file gate: policy (a denied file is silently excluded from an unscoped
+	// diff so a dirty .env can never leak) AND, when scoped, the path scope.
+	filter := func(rel string) bool {
+		if !ws.Policy.CheckFile(rel).Allowed {
+			return false
+		}
+		return scopeMatches(scope, rel)
+	}
+
+	reader := rootWorktreeReader{root: ws.Root, max: ws.Read.MaxBytes}
+	diffs, err := gitaware.Diff(ws.Root.Dir(), reader, gitaware.DiffOptions{
+		Staged:       a.Staged,
+		PathFilter:   filter,
+		MaxFileBytes: ws.Read.MaxBytes,
+	})
+	if err != nil {
+		return nil, ev, mapPathError(err)
+	}
+
+	if scoped && len(diffs) == 0 {
+		// Decide NOT_FOUND vs unchanged: the path is present if the worktree has
+		// it (tracked or not), or it lives in the index/HEAD (a deleted file).
+		exists := false
+		if _, statErr := ws.Root.Stat(scope); statErr == nil {
+			exists = true
+		}
+		if !exists {
+			if known, _ := gitaware.PathInRepo(ws.Root.Dir(), scope); known {
+				exists = true
+			}
+		}
+		if !exists {
+			return nil, ev, newToolError("NOT_FOUND", "path not found in worktree, index, or HEAD")
+		}
+	}
+
+	res := gitDiffResult{Files: make([]gitDiffFileSummary, 0, len(diffs))}
+	var b strings.Builder
+	totalCap := ws.Read.MaxBytes
+	for _, fd := range diffs {
+		res.Files = append(res.Files, gitDiffFileSummary{
+			Path:      fd.Path,
+			Change:    fd.Change,
+			Additions: fd.Additions,
+			Deletions: fd.Deletions,
+			Binary:    fd.Binary,
+			TooLarge:  fd.TooLarge,
+			Symlink:   fd.Symlink,
+		})
+		if res.Truncated {
+			continue // files list stays complete; diff text stopped at the cap
+		}
+		piece := diffPiece(fd)
+		if totalCap > 0 && int64(b.Len()+len(piece)) > totalCap && b.Len() > 0 {
+			res.Truncated = true
+			continue
+		}
+		b.WriteString(piece)
+	}
+	res.Diff = b.String()
+
+	switch {
+	case res.Truncated:
+		res.Notice = diffTruncatedNotice
+	case len(res.Files) == 0:
+		res.Notice = "no changes"
+	}
+	ev.Matches = len(res.Files)
+	return res, ev, nil
+}
+
+// diffPiece returns the text a single file contributes to the unified diff:
+// its patch, or a one-line marker for content that is intentionally skipped.
+func diffPiece(fd gitaware.FileDiff) string {
+	switch {
+	case fd.Symlink:
+		return "# diff of " + fd.Path + " skipped: symlink\n"
+	case fd.TooLarge:
+		return "# diff of " + fd.Path + " skipped: file exceeds read limit\n"
+	case fd.Binary:
+		return "Binary files a/" + fd.Path + " and b/" + fd.Path + " differ\n"
+	default:
+		return fd.Patch
+	}
+}
+
+// scopeMatches reports whether rel falls under a scope path. An empty scope
+// matches everything; otherwise it matches the exact file or a segment-aligned
+// directory prefix ("mcp" matches "mcp/tools.go", not "mcpx/y.go").
+func scopeMatches(scope, rel string) bool {
+	if scope == "" || scope == "." {
+		return true
+	}
+	return rel == scope || strings.HasPrefix(rel, scope+"/")
 }

@@ -92,7 +92,7 @@ How to use it:
 2. Locate and browse: tree_search finds files by path and/or content. Omit "path" (or pass "**/*") to see the ENTIRE tree at once; use a glob like "docs/**/*.md" to narrow by name/location ("**" crosses directories, a single "*" does not — "*" is root-level only). Add "where" (content predicates) to find where a term appears. Omit "where" to just list matching files with their sizes (this is also how you explore directory structure) — and pass "includeMetadata": true on that listing to get each file's frontmatter (title/tags/summary) so you can pick the right files in one pass instead of guessing from filenames. Narrow "path" to avoid truncation.
 3. Read: file_read returns a file's contents; large files truncate at a byte cap (raise "maxBytes" up to the workspace limit).
 {{if .IsGitRepo -}}
-4. git_status gives the current branch + per-file change codes (this workspace is a git repository).
+4. git_status gives the current branch + per-file change codes, and git_diff shows what changed inside those files as a unified diff (this workspace is a git repository).
 {{end -}}
 {{if .Writable}}
 Editing (only when the user asks you to change files): file_create writes a new file (fails if it exists), file_overwrite replaces an existing file wholesale, and file_replace swaps an exact substring (defaults to a unique single match). Edits write raw bytes with no normalization; pass a file's current "sha256" (returned by file_read, or by a prior write) as "base_sha256" to refuse the write if the file changed underneath you, and "dry_run": true to preview. Writes go only where reads are allowed — blocked paths stay unwritable. The human reviews the diff in git and commits; this server never commits, pushes, deletes, moves, or renames.
@@ -240,6 +240,7 @@ var toolHandlers = map[string]toolFunc{
 	"file_read":      (*Server).fileRead,
 	"tree_search":    (*Server).treeSearch,
 	"git_status":     (*Server).gitStatus,
+	"git_diff":       (*Server).gitDiff,
 	// Write surface (§8.7). Always registered so a forced call on a write-disabled
 	// workspace returns READ_ONLY (via writeGate) rather than "unknown tool"; they
 	// only appear in tools/list when write.enabled (see toolDefs).
