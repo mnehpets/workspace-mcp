@@ -192,7 +192,14 @@ func reapStaleZrokEnvs(root *zrokRoot, description string, log *mcp.Logger) {
 		if er.Environment == nil || er.Environment.Description != description || er.Environment.ZID == "" {
 			continue
 		}
-		if err := sdk.DisableEnvironment(&sdk.Environment{ZitiIdentity: er.Environment.ZID}, root); err != nil {
+		// The disable can transiently 500 if the controller is still tearing the
+		// environment down; retry briefly. Still best-effort — a final failure
+		// only warns, since the subsequent enable has its own (longer) retry and
+		// the free tier's 25-environment cap leaves room for a lingering stale one.
+		err := retryTransientZrok("reap: disable stale environment", 3, time.Second, log, func() error {
+			return sdk.DisableEnvironment(&sdk.Environment{ZitiIdentity: er.Environment.ZID}, root)
+		})
+		if err != nil {
 			log.Slog().Warn("zrok reap: disable stale environment", "zId", er.Environment.ZID, "err", err)
 			continue
 		}
@@ -200,31 +207,38 @@ func reapStaleZrokEnvs(root *zrokRoot, description string, log *mcp.Logger) {
 	}
 }
 
-// createZrokShareWithRetry opens the public proxy share, retrying on the
-// controller's transient 500s. CreateShare's allocation step runs a sequence of
-// live ziti-network operations (config, service, then bind/dial/edge-router
-// policies); any one can momentarily flake and surface as an opaque
-// shareInternalServerError. Those are safe to retry — the request is unchanged
-// and idempotent from our side. A 409 (name conflict) or any other error is
-// deterministic, so we return it immediately rather than retrying into the same wall.
-func createZrokShareWithRetry(root *zrokRoot, req *sdk.ShareRequest, log *mcp.Logger) (*sdk.Share, error) {
-	const attempts = 3
+// isTransientZrok reports whether a zrok controller error is a transient 5xx
+// worth retrying. The go-swagger response types all expose IsServerError(), so
+// we match that interface via errors.As rather than any one concrete type —
+// covering enable/disable/share with a single predicate and surviving SDK type
+// renames. A 4xx (401 unauthorized, 404 not found, 409 name conflict) is
+// deterministic and never retried.
+func isTransientZrok(err error) bool {
+	var srv interface{ IsServerError() bool }
+	return errors.As(err, &srv) && srv.IsServerError()
+}
+
+// retryTransientZrok runs op, retrying on transient controller 5xxs with linear
+// backoff (1·step, 2·step, … up to attempts). The zrok controller runs a
+// sequence of live ziti-network operations per call and momentarily 500s while a
+// previous environment/share is still being torn down server-side (e.g. after an
+// unclean exit); given a little wall-clock those settle. A non-transient error,
+// or the last attempt, returns immediately. label names the operation in logs.
+func retryTransientZrok(label string, attempts int, step time.Duration, log *mcp.Logger, op func() error) error {
 	var err error
 	for attempt := 1; attempt <= attempts; attempt++ {
-		var shr *sdk.Share
-		if shr, err = sdk.CreateShare(root, req); err == nil {
-			return shr, nil
+		if err = op(); err == nil {
+			return nil
 		}
-		var ise *zrokshare.ShareInternalServerError
-		if !errors.As(err, &ise) || attempt == attempts {
-			return nil, err
+		if !isTransientZrok(err) || attempt == attempts {
+			return err
 		}
-		backoff := time.Duration(attempt) * time.Second
-		log.Slog().Warn("zrok create share failed (transient), retrying",
+		backoff := time.Duration(attempt) * step
+		log.Slog().Warn("zrok "+label+" failed (transient), retrying",
 			"attempt", attempt, "attempts", attempts, "backoff", backoff.String(), "err", err)
 		time.Sleep(backoff)
 	}
-	return nil, err
+	return err
 }
 
 // serveZrok brings up the built-in zrok tunnel and serves the handler over
@@ -262,9 +276,18 @@ func serveZrok(cfg *mcp.Config, env map[string]string, handler http.Handler, log
 	}
 
 	host, _ := os.Hostname()
-	zenv, err := sdk.EnableEnvironment(root, &sdk.EnableRequest{
-		Host:        host,
-		Description: envDescription,
+	// Enable races the controller's teardown of any environment a previous
+	// unclean exit left behind (or that the reaper just disabled), which surfaces
+	// as a transient enableInternalServerError until the controller settles. Give
+	// it the longest runway of any call here, since it blocks startup entirely.
+	var zenv *sdk.Environment
+	err = retryTransientZrok("enable environment", 5, 2*time.Second, log, func() error {
+		var e error
+		zenv, e = sdk.EnableEnvironment(root, &sdk.EnableRequest{
+			Host:        host,
+			Description: envDescription,
+		})
+		return e
 	})
 	if err != nil {
 		return fmt.Errorf("zrok enable environment: %w", err)
@@ -291,14 +314,19 @@ func serveZrok(cfg *mcp.Config, env map[string]string, handler http.Handler, log
 		}
 	}
 
-	shr, err := createZrokShareWithRetry(root, &sdk.ShareRequest{
-		ShareMode:   sdk.PublicShareMode,
-		BackendMode: sdk.ProxyBackendMode,
-		Target:      "share-" + label,
-		NameSelections: []sdk.NameSelection{
-			{NamespaceToken: root.frontend, Name: cfg.Server.Zrok.UniqueName},
-		},
-	}, log)
+	var shr *sdk.Share
+	err = retryTransientZrok("create share", 3, time.Second, log, func() error {
+		var e error
+		shr, e = sdk.CreateShare(root, &sdk.ShareRequest{
+			ShareMode:   sdk.PublicShareMode,
+			BackendMode: sdk.ProxyBackendMode,
+			Target:      "share-" + label,
+			NameSelections: []sdk.NameSelection{
+				{NamespaceToken: root.frontend, Name: cfg.Server.Zrok.UniqueName},
+			},
+		})
+		return e
+	})
 	if err != nil {
 		disableEnv()
 		return fmt.Errorf("zrok create share: %w", err)

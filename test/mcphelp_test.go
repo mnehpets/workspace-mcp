@@ -47,7 +47,7 @@ func newMCPFixture(t *testing.T, reg *mcp.Registry) *mcpFixture {
 	const token = "0123456789abcdef0123456789abcdef"
 	logs := &bytes.Buffer{}
 	log := mcp.NewLogger("info", logs)
-	handler := mcp.BuildHandler(reg, log, []string{token}, nil, nil)
+	handler := mcp.BuildHandler(reg, log, []string{token}, nil, nil, false)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 	return &mcpFixture{base: ts.URL, url: ts.URL + "/mcp/default", token: token, logs: logs}

@@ -85,7 +85,12 @@ func run() error {
 		return serveStdio(mcp.NewServer(ws, log), log)
 	}
 
-	handler := mcp.BuildHandler(reg, log, bearerTokens, oauthServer, cfg.Server.AllowedOrigins)
+	// Only the zrok frontend terminates the client connection and forwards over
+	// the ziti overlay, so X-Forwarded-For is the sole source of the real client
+	// address there; ngrok and direct TCP preserve it in RemoteAddr. Decide the
+	// trust here, where the active tunnel is known, rather than sniffing per-request.
+	trustForwardedFor := cfg.Server.Zrok.Enabled
+	handler := mcp.BuildHandler(reg, log, bearerTokens, oauthServer, cfg.Server.AllowedOrigins, trustForwardedFor)
 
 	if cfg.Server.Zrok.Enabled {
 		return serveZrok(cfg, env, handler, log)

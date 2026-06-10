@@ -132,7 +132,7 @@ func TestWWWAuthenticateOnOAuth401(t *testing.T) {
 
 	// With OAuth: header present and resource-scoped to the endpoint path.
 	oauth := mcp.NewOAuthServer("client", "supersecretsupersecretsupersecret")
-	h := mcp.BuildHandler(reg, log, []string{"tok"}, oauth, nil)
+	h := mcp.BuildHandler(reg, log, []string{"tok"}, oauth, nil, false)
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
@@ -154,7 +154,7 @@ func TestWWWAuthenticateOnOAuth401(t *testing.T) {
 	}
 
 	// Without OAuth: no resource_metadata hint (static-bearer-only deployment).
-	h2 := mcp.BuildHandler(reg, log, []string{"tok"}, nil, nil)
+	h2 := mcp.BuildHandler(reg, log, []string{"tok"}, nil, nil, false)
 	ts2 := httptest.NewServer(h2)
 	defer ts2.Close()
 	req2, _ := http.NewRequest("POST", ts2.URL+"/mcp/notes", strings.NewReader(`{}`))
@@ -178,7 +178,7 @@ func TestProtectedResourceMetadataPerEndpoint(t *testing.T) {
 	reg, _, _ := twoWorkspaceRegistry(t)
 	log := mcp.NewLogger("error", &bytes.Buffer{})
 	oauth := mcp.NewOAuthServer("client", "supersecretsupersecretsupersecret")
-	ts := httptest.NewServer(mcp.BuildHandler(reg, log, []string{"tok"}, oauth, nil))
+	ts := httptest.NewServer(mcp.BuildHandler(reg, log, []string{"tok"}, oauth, nil, false))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/.well-known/oauth-protected-resource/mcp/notes")
@@ -231,7 +231,7 @@ func TestOriginValidation(t *testing.T) {
 	}
 
 	// Empty allowlist (nil): Origin-less passes, ANY present Origin is rejected.
-	def := httptest.NewServer(mcp.BuildHandler(reg, log, []string{"tok"}, nil, nil))
+	def := httptest.NewServer(mcp.BuildHandler(reg, log, []string{"tok"}, nil, nil, false))
 	defer def.Close()
 	if got := post(def, ""); got != http.StatusUnauthorized {
 		t.Errorf("absent origin: want 401 (past origin gate), got %d", got)
@@ -244,7 +244,7 @@ func TestOriginValidation(t *testing.T) {
 	}
 
 	// Explicit allowlist: the named origin passes the gate, others are rejected.
-	named := httptest.NewServer(mcp.BuildHandler(reg, log, []string{"tok"}, nil, []string{"http://localhost:6274"}))
+	named := httptest.NewServer(mcp.BuildHandler(reg, log, []string{"tok"}, nil, []string{"http://localhost:6274"}, false))
 	defer named.Close()
 	if got := post(named, "http://localhost:6274"); got != http.StatusUnauthorized {
 		t.Errorf("allowlisted origin: want 401 (past origin gate), got %d", got)
@@ -254,7 +254,7 @@ func TestOriginValidation(t *testing.T) {
 	}
 
 	// "*" disables the check: an arbitrary origin reaches the auth layer.
-	any := httptest.NewServer(mcp.BuildHandler(reg, log, []string{"tok"}, nil, []string{"*"}))
+	any := httptest.NewServer(mcp.BuildHandler(reg, log, []string{"tok"}, nil, []string{"*"}, false))
 	defer any.Close()
 	if got := post(any, "https://evil.example"); got != http.StatusUnauthorized {
 		t.Errorf("wildcard origin: want 401 (past origin gate), got %d", got)

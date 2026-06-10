@@ -23,8 +23,13 @@ import (
 // allowedOrigins is the Origin-header allowlist (MCP 2025-11-25 DNS-rebinding
 // defense); empty means Origin-less requests pass and any present Origin is
 // rejected (see NewOriginCheck).
-func BuildHandler(reg *Registry, log *Logger, bearerTokens []string, oauthServer *OAuthServer, allowedOrigins []string) http.Handler {
-	bearer := NewBearer(bearerTokens, log)
+//
+// trustForwardedFor selects where audit logging reads the client address from:
+// true only when the server is fronted by a tunnel that terminates the client
+// and injects X-Forwarded-For (zrok), false for ngrok/direct where RemoteAddr is
+// the real peer. See Bearer.clientAddr.
+func BuildHandler(reg *Registry, log *Logger, bearerTokens []string, oauthServer *OAuthServer, allowedOrigins []string, trustForwardedFor bool) http.Handler {
+	bearer := NewBearer(bearerTokens, log, trustForwardedFor)
 	if oauthServer != nil {
 		// With OAuth on, an unauthenticated request gets a WWW-Authenticate header
 		// pointing at this endpoint's protected-resource metadata (RFC 9728).

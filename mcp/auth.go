@@ -24,16 +24,21 @@ type Bearer struct {
 	extra            func(string) bool
 	log              *Logger
 	resourceMetadata bool // emit a WWW-Authenticate resource_metadata hint on 401
+	trustXFF         bool // log the client from X-Forwarded-For (set only behind a trusted tunnel that injects it, e.g. zrok)
 }
 
 // NewBearer builds a Bearer processor accepting any of the given tokens. With an
 // empty slice every request is rejected unless an extra validator is set.
-func NewBearer(tokens []string, log *Logger) *Bearer {
+// trustXFF should be true only when the server sits behind a tunnel/proxy that
+// terminates the client connection and injects X-Forwarded-For (zrok), where
+// RemoteAddr is otherwise an opaque transport string; it must be false for the
+// ngrok and direct-TCP paths, where RemoteAddr is the real, unspoofable peer.
+func NewBearer(tokens []string, log *Logger, trustXFF bool) *Bearer {
 	exp := make([][32]byte, len(tokens))
 	for i, t := range tokens {
 		exp[i] = sha256.Sum256([]byte(t))
 	}
-	return &Bearer{expected: exp, log: log}
+	return &Bearer{expected: exp, log: log, trustXFF: trustXFF}
 }
 
 // WithExtra adds a dynamic token validator (e.g. OAuth access token check) that
@@ -69,7 +74,7 @@ func (b *Bearer) Process(w http.ResponseWriter, r *http.Request, next func(http.
 	}
 	ok := token != "" && match == 1
 	if b.log != nil {
-		b.log.Auth(ok, r.RemoteAddr)
+		b.log.Auth(ok, b.clientAddr(r))
 	}
 	if !ok {
 		if b.resourceMetadata {
@@ -82,6 +87,30 @@ func (b *Bearer) Process(w http.ResponseWriter, r *http.Request, next func(http.
 		return nil, endpoint.Error(http.StatusUnauthorized, "unauthorized", nil)
 	}
 	return next(w, r)
+}
+
+// clientAddr returns the best client address for audit logging. Normally that
+// is the real TCP peer (r.RemoteAddr), which the client cannot forge. But when
+// the server runs behind a tunnel that terminates the client connection
+// elsewhere and forwards over an overlay — zrok/ziti, where RemoteAddr is an
+// opaque "ziti-edge-router connId=..." string with no client IP in it — the only
+// place the originating client survives is the frontend-injected
+// X-Forwarded-For header. trustXFF is set (at wiring time, by the zrok serve
+// path) only for that case, so a client on the ngrok/direct path cannot spoof
+// its logged identity via a forged header. We take the first XFF entry (the
+// originating client); a missing header falls back to RemoteAddr rather than
+// inventing a value, which also surfaces a wrong header-name assumption instead
+// of hiding it.
+func (b *Bearer) clientAddr(r *http.Request) string {
+	if b.trustXFF {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if i := strings.IndexByte(xff, ','); i >= 0 {
+				return strings.TrimSpace(xff[:i])
+			}
+			return strings.TrimSpace(xff)
+		}
+	}
+	return r.RemoteAddr
 }
 
 func extractBearer(header string) string {
