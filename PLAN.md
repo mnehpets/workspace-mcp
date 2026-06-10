@@ -739,31 +739,39 @@ editing — the natural companion to `git_status` (which lists changed paths; th
 shows the content). Git-repo workspaces only (else `NOT_A_GIT_REPO`), read-only, no
 `git` binary (go-git, pure Go, like `git_status`). Metadata-adjacent but it *does*
 return file content, so the path arg gates exactly like a read.
-- [ ] **`git_diff` tool** ([mcp/tools.go]) — `{ "path"?: string, "staged"?: bool }`
-      → `{ "diff": string, "truncated": bool, "notice"?: string }` (or a structured
-      per-file hunk list — decide during build; a unified-diff string is the simpler
-      first cut). Whole-worktree when `path` omitted; scoped to one file when given.
-      `staged: true` diffs the index vs HEAD, else worktree vs index/HEAD.
-- [ ] **go-git backend** ([gitaware/], new `diff.go` beside [gitaware/status.go]) —
-      derive the patch from `Worktree().Status()` + the relevant trees
-      (`Patch`/`Object` APIs). Reads via go-git's own billy FS (metadata-style), but
-      because it emits content, see the gating bullet.
-- [ ] **Path gating + limits.** Any `path` rides the workspace's `os.Root` + policy
+- Decided: **unified-diff text inside a thin JSON envelope** (not structured
+  per-hunk JSON) — rationale in [PLAN-git-diff.md] §0.1. `path` may name a file
+  *or* a directory prefix (git-pathspec style).
+- [x] **`git_diff` tool** ([mcp/tools.go]) — `{ "path"?: string, "staged"?: bool }`
+      → `{ "files": [{path, change, additions, deletions, binary?, tooLarge?,
+      symlink?}], "diff": string, "truncated": bool, "notice"?: string }`. `files`
+      is always complete (cheap metadata) even when `diff` is capped. Whole-worktree
+      when `path` omitted; scoped to a file/subtree when given. `staged: true` diffs
+      the index vs HEAD, else worktree vs index (untracked included as all-new).
+- [x] **go-git backend** ([gitaware/diff.go], beside [gitaware/status.go]) — drives
+      off `Worktree().Status()`; per file pairs the index/HEAD blob (object store)
+      with the worktree bytes and renders a unified patch via `fdiff.UnifiedEncoder`.
+      Worktree bytes are read through an injected `WorktreeReader` (backed by the
+      workspace `os.Root`), never go-git's billy FS — because it emits content.
+- [x] **Path gating + limits.** Any `path` rides the workspace's `os.Root` + policy
       like every other path arg — a blocked/absent path → `POLICY_DENIED`/`NOT_FOUND`
-      (never diff a `.env`/key). Cap the emitted diff by `read.maxBytes`; on the cap,
-      `truncated: true` + a steering `notice` (narrow to a `path`), per §8.4's
-      truncation-steers convention. Skip/flag binary file diffs.
-- [ ] **Annotations + tests** — `readOnlyHint: true`, `openWorldHint: false` like the
-      other reads; `test/gitaware_test.go` covers a dirty worktree (added/modified/
-      deleted), staged vs unstaged, a path-scoped diff, a blocked path → `POLICY_DENIED`,
-      and a non-git workspace → `NOT_A_GIT_REPO`.
+      (never diff a `.env`/key); an unscoped diff silently excludes policy-denied
+      files. Per-file and total caps by `read.maxBytes`; on the total cap,
+      `truncated: true` + a steering `notice`, per §8.4. Binary/symlink/over-limit
+      files are listed with a one-line marker, content skipped.
+- [x] **Annotations + tests** — `readOnlyHint: true`, `openWorldHint: false` like the
+      other reads; [test/gitdiff_test.go] covers the full matrix in [PLAN-git-diff.md]
+      §5 (dirty worktree add/modify/delete, staged vs unstaged, path/dir scope,
+      blocked path → `POLICY_DENIED`, unscoped hides a dirty blocked file, non-git →
+      `NOT_A_GIT_REPO`, binary/tooLarge/symlink markers, total-cap truncation,
+      unborn HEAD, CRLF, no-newline-at-EOF fidelity).
 - **Done when:** `git_diff` returns the working-tree (and staged) diff for a git
   workspace, honors `os.Root` + policy on any `path`, caps by `read.maxBytes` with a
   steering notice, and returns `NOT_A_GIT_REPO` off a git repo — no `git` binary, no
   mutation. Composes with `git_status` (list changed → diff them) and ranged
-  `file_read`.
+  `file_read`. ✅ Done.
 
-### 22. Suspected bug — oversize tool-call request bodies die opaquely (decode-layer field limit)
+### 22. Fixed bug — oversize tool-call request bodies died opaquely (decode-layer field limit)
 Observed 2026-06-10, live claude.ai session over zrok: a `file_create` whose
 `contents` was ~17–18 KB failed twice, deterministically, with claude.ai's generic
 "Error occurred during tool execution" — no structured tool error (no `PATH_EXISTS`
@@ -784,36 +792,98 @@ the effective request ceiling silently being ~16 KiB contradicts the tool contra
 and the opaque failure gives the model nothing to adapt to (the chunked
 `file_replace` workaround was found by trial and error).
 
-- [ ] **Reproduce + isolate the layer.** Check the server audit log for the two
-      failing requests (did they arrive at all?). Then curl a `tools/call` with a
-      >17 KB string param at the local listener directly, and again through zrok —
-      separates endpoint-layer rejection from tunnel/client limits.
-- [ ] **Confirm the limit** in `mnehpets/http` `endpoint/decode.go` @ v0.6.0:
-      which constant, per-field or whole-body, and what HTTP status/body it
-      produces on violation (that response shape is why claude.ai showed a generic
-      error).
-- [ ] **Fix the ceiling.** The MCP JSON-RPC endpoint must accept request bodies
-      sized for legitimate write payloads: at least the per-workspace write/read
-      ceiling (`read.maxBytes`) *plus* JSON-escaping overhead (escaped content can
-      approach ~2× raw in the worst case) plus envelope slack. Either bump/expose
-      the limit per-endpoint in `mnehpets/http` and upgrade the pin, or configure
-      it where the endpoint is built in [mcp/handler.go]. Keep *some* cap — it is
-      a sane DoS guard — just sized to the contract, not 16 KiB.
-- [ ] **Error shape.** An over-limit request must surface as a structured,
-      model-readable error (HTTP 413 with a JSON-RPC error body, or an in-band
-      `REQUEST_TOO_LARGE` tool error naming the limit and suggesting chunked
-      `file_replace`), never an opaque transport failure. Add the chosen code to
-      §13 once decided.
-- [ ] **Test.** Integration test POSTing `tools/call` requests bracketing the
-      limit: a write payload at the documented ceiling succeeds; one beyond it
-      fails with the structured error, not a connection-level death.
-- [ ] **Tool-description hint (optional).** If a hard ceiling remains, say so in
-      the write tools' descriptions ("for content larger than ~N, build the file
-      in `file_replace` chunks") so models route around it without a failed call.
+- [x] **Reproduce + isolate the layer.** Confirmed at the request-decode layer:
+      [test/largebody_test.go] POSTs a ~20 KB `tools/call` `file_create` (whose
+      handler does *not* cap `contents`, so only the transport can reject it).
+      Against the pre-fix library it dies with a bare `HTTP 400 Bad Request` —
+      exactly the opaque, pre-handler failure observed live.
+- [x] **Confirm the limit** in `mnehpets/http` `jsonrpc` (v0.6.0): the jsonrpc body
+      field (`rpcParams.Body []byte body:""`) inherited the endpoint decoder's
+      `defaultFieldLimit` of **16 KiB**, enforced in `endpoint/decode.go`
+      `setFieldFromSource` (`len(val) > tag.MaxLength` → 400 Bad Request). The 16 KiB
+      cap fits every observation.
+- [x] **Fix the ceiling.** Fixed upstream in `mnehpets/http` v0.6.1 (commit
+      "Fix jsonrpc body size limit … make the body limit 12MB for jsonrpc"): the
+      jsonrpc body field now carries `maxLength:"12582912"` (12 MB) and the limit is
+      enforced *while reading* the body (bounded buffering, not post-read). `go.mod`
+      pin bumped v0.6.0 → v0.6.1. Keeps a DoS guard, sized far above the write
+      contract.
+- [x] **Test.** [test/largebody_test.go] passes on v0.6.1 (200, full content
+      written) and fails on the pre-fix library (HTTP 400) — bracketing the fix.
+- **Decided — error shape left as a transport 400 (no `REQUEST_TOO_LARGE`).** The
+  12 MB ceiling is now so far above any legitimate write payload that hitting it
+  is effectively a DoS attempt, not a contract case a model needs to adapt to; and
+  the real-world workaround (chunked `file_replace`) was discoverable even from the
+  opaque error. Not worth a bespoke structured code / §13 entry. No tool-description
+  hint needed.
+- **Note — the *effective* ceiling is the client/tunnel, not our 12 MB.** Observed
+  on claude.ai: a single-shot write of ~512 KB still failed, well under the server
+  limit. The binding cap in practice is upstream (claude.ai request size and/or the
+  zrok tunnel), and no LLM context produces a payload near 12 MB anyway — so our
+  limit is a pure DoS backstop, never the wall a model actually hits. The practical
+  guidance is unchanged: for content beyond a few hundred KB, build the file in
+  `file_replace` chunks. (Left out of the tool descriptions to keep them lean; this
+  note is the record.)
 - **Done when:** a single-shot `file_create`/`file_overwrite` up to the configured
-  write ceiling succeeds end-to-end through claude.ai + zrok, an over-limit
-  request returns the documented structured error, and the limit + error code are
-  recorded in §13.
+  write ceiling succeeds end-to-end (the 16 KiB transport cap is gone). ✅ Done —
+  resolved by the v0.6.1 bump; oversize-error-shape intentionally left as a plain
+  400 (rationale above).
+
+### 23. Verify `.gitignore` handling is correct and consistent across all tools (minor)
+Observed 2026-06-10: `.claude/settings.local.json` appears as untracked (`??`) in
+`git_status` output even though it is listed in the repo's `.gitignore`. A real
+`git status` suppresses ignored files, so go-git's `Worktree().Status()` is not
+honoring `.gitignore` here — and since `git_diff` (task 21) is driven off the same
+`Status()` map, the same gap would let an ignored file surface as an untracked
+all-additions diff.
+
+This is a deviation from the plan's own stated intent. §6 says to **"pick one
+engine … one ignore notion across all read tools, not two"** — standardize on
+grrep's `IgnoreSet` for `tree_search` and use go-git "only for `git_status` +
+tracked enumeration." In practice that leaves **two independent ignore engines**
+that can disagree:
+- `tree_search` → `bep/gogitignore` via [grrep/ignore.go]: loads `.gitignore`
+  *and* `.ignore` per directory, hierarchically; does **not** read
+  `.git/info/exclude` or the global `core.excludesFile`.
+- `git_status` / `git_diff` → go-git `Worktree().Status()` ([gitaware/status.go],
+  [gitaware/diff.go]): go-git's own built-in ignore handling — evidently not
+  catching the case above. [gitaware/status.go] does no `IgnoreSet` filtering of
+  its own, and the per-workspace `respectGitignore` flag (§7) appears unwired on
+  the git path.
+
+Security note (bounds the urgency): the policy layer — block globs + the dotfile
+backstop + the allowlist — is the real containment boundary, independent of
+`.gitignore`. The observed file is safe in `git_diff` *content* because `.claude/`
+is a dot segment caught by the dotfile backstop (confirmed: `file_read .gitignore`
+→ `POLICY_DENIED`/`dotfile`). The exposure is a gitignored file that is (a) **not**
+a dotfile and (b) **not** in policy — e.g. a build artifact
+(`cmd/workspace-mcp/workspace-mcp`) or a local `config.yaml` — which could then
+show as an untracked `git_status`/`git_diff` entry. So this is primarily a
+**correctness/noise** issue, not a containment hole; `.gitignore` is not a
+security control.
+
+- [ ] **Reproduce + characterize go-git.** Confirm whether go-git `Status()` honors
+      a repo-root `.gitignore`, nested `.gitignore`, `.git/info/exclude`, the global
+      `core.excludesFile`, and negation (`!`) patterns; pin down which it misses
+      (the `.claude/settings.local.json` case shows at least one does).
+- [ ] **Compare the two engines** on one fixture tree and record where `tree_search`
+      and `git_status`/`git_diff` diverge.
+- [ ] **Honor the §6 "one ignore notion" goal.** Make the git path use the same
+      ignore decision as the walker — filter `Status()` entries through grrep's
+      `IgnoreSet` (or post-filter against it) so `git_status`/`git_diff`/`tree_search`
+      agree — and actually wire `respectGitignore` (§7) on the git path. Consider an
+      explicit `includeIgnored: true` opt-in if surfacing ignored files is ever wanted.
+- [ ] **Tests.** Fixture with a gitignored non-dot file (e.g. `build/out.bin`) plus a
+      gitignored dotfile: assert neither appears in `git_status` or an unscoped
+      `git_diff`, and that `tree_search` agrees. Extend the [PLAN-git-diff.md] §5 matrix.
+- [ ] **Docs.** State the ignore semantics in [docs/design.md] for `git_status`,
+      `git_diff`, and `tree_search`, and note explicitly that `.gitignore` is a
+      noise/correctness filter, **not** a security boundary (policy is).
+- **Done when:** ignored files are handled consistently across `git_status`,
+  `git_diff`, and `tree_search` per the documented decision (honoring §6's one-engine
+  goal and the `respectGitignore` flag), a regression test covers a gitignored
+  non-dotfile, and the design doc states the semantics and the policy-is-the-boundary
+  caveat.
 
 ---
 
@@ -841,11 +911,12 @@ and the opaque failure gives the model nothing to adapt to (the chunked
   file's actual hash ("re-read and retry"); no write.
 - **Write target exceeds `read.maxBytes`** (file too large to read-modify-write
   safely) → `FILE_TOO_LARGE`; no partial write.
-- **Oversize request body** — KNOWN GAP (task 22): a `tools/call` whose JSON body
-  exceeds the endpoint decode limit (suspected ~16 KiB max-field cap in
-  `mnehpets/http` `endpoint/decode.go`) currently dies *before* the handler with no
-  structured error reaching the client. To be specced (e.g. `REQUEST_TOO_LARGE` or
-  HTTP 413 + JSON-RPC error) and fixed in task 22.
+- **Oversize request body** — FIXED (task 22): a `tools/call` whose JSON body
+  exceeded the jsonrpc decode limit (16 KiB default field cap in `mnehpets/http`)
+  died *before* the handler with a bare HTTP 400. Resolved by bumping the body
+  limit to 12 MB in `mnehpets/http` v0.6.1; beyond that the request still gets a
+  plain 400, deliberately not a structured `REQUEST_TOO_LARGE` (12 MB is a DoS
+  guard, not a contract case — see task 22).
 
 ---
 
@@ -901,6 +972,16 @@ and the opaque failure gives the model nothing to adapt to (the chunked
   Composes naturally with ranged `file_read` (§12.13) — blame a span, then read it.
   Note go-git blame can be heavy on large/long-history files; bound it (line cap,
   maybe a size guard) and document the cost.
+- **`git_diff` paging for a single oversized hunk (corner, not yet hit).** `git_diff`
+  caps the emitted diff at `read.maxBytes` and steers the model to re-scope to a `path`
+  when truncated — but a *single* file whose diff alone exceeds the cap has nothing
+  narrower to scope to (the first file is always emitted whole, so it can exceed the
+  budget; there is no line-range equivalent to `file_read`'s `startLine`/`endLine`).
+  The per-file `tooLarge` guard already skips files whose *content* exceeds the cap, so
+  this only bites a file with a huge *diff* but each side under the limit — rare, and
+  current behavior fails safe (returns more than the budget, never a silent omission).
+  If a real case appears, add a `maxBytes` override (mirroring `file_read`) or diff
+  paging; until then, deliberately not built (no over-design for an unobserved corner).
 - Per-client tokens (scoped to specific workspaces), rotation without restart,
   session expiry.
 - Rate limits and a per-session byte budget.

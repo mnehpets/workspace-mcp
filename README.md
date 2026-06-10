@@ -285,6 +285,7 @@ Then start a chat and ask Claude to use the connector, e.g.:
 | `file_read`      | Read one allowed file (`path`, optional `maxBytes`).               |
 | `tree_search`    | Find/browse files by `path` glob and/or `where` content predicates (frontmatter-aware); each result carries its `size`. |
 | `git_status`     | Branch + per-file status — git-repo workspaces only.              |
+| `git_diff`       | Working-tree diff as a unified diff (`path?`, `staged?`) — what changed inside the files `git_status` lists. Git-repo workspaces only. |
 
 No tool takes a `workspace` argument: the workspace is fixed by the connector URL
 (`/mcp/<workspace>`). All paths are workspace-relative and resolved through that

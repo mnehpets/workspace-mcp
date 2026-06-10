@@ -470,6 +470,30 @@ Read-only status, git-repo workspaces only.
 - go-git `Worktree().Status()` + `repo.Head()`; non-git workspace → `NOT_A_GIT_REPO`.
   No mutation, no `git` binary. ([mcp/tools.go:438])
 
+#### `git_diff`
+Read-only working-tree diff, git-repo workspaces only — the content companion to
+`git_status`. Emits a **standard unified diff string** in a thin JSON envelope (not
+per-hunk JSON): LLMs read unified diffs natively, and this tool only ever *emits*
+them. Rationale recorded in [PLAN-git-diff.md] §0.1.
+- **in** `path`? (a file or a directory prefix to scope to a subtree), `staged`?
+  (index-vs-HEAD like `git diff --cached`; default worktree-vs-index like `git diff`)
+- **out** `{ "files": [ { "path", "change", "additions", "deletions", "binary"?,
+  "tooLarge"?, "symlink"? } ], "diff": string, "truncated": bool, "notice"?: string }`.
+  `change` ∈ `added | modified | deleted | untracked`. Untracked files appear as
+  all-new in the default (unstaged) mode. `files` is always complete even when `diff`
+  is capped — so truncation is steerable ("re-run scoped to that path"). Empty diff
+  (clean tree / unchanged scoped path) is success with `notice: "no changes"`.
+- **Security — it returns content, so it gates like a read, unlike `git_status`.**
+  Worktree bytes are read through the workspace `os.Root` via an injected
+  `WorktreeReader` (symlink-/TOCTOU-safe); blob bytes come from go-git's object
+  store under `.git/`. A scoped `path` is `Clean`+`policy.CheckFile`-gated
+  (blocked → `POLICY_DENIED`, `..`/absolute → mapped); an unscoped diff silently
+  excludes every policy-denied file, so a dirty `.env` never leaks. Symlinks are
+  skipped (flagged, target never read). Per-file and total caps at `read.maxBytes`;
+  binary/over-limit/symlink files are listed with a one-line marker, content
+  skipped. No rename detection (a rename shows as delete + add). go-git, no `git`
+  binary, no mutation. ([gitaware/diff.go], [mcp/tools.go])
+
 #### Write surface — `file_create` / `file_overwrite` / `file_replace` (opt-in)
 
 Three explicit byte-level ops mirroring the Claude Code edit tools — **not** a diff
