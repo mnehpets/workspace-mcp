@@ -22,12 +22,14 @@ type Config struct {
 	Log        LogConfig         `yaml:"log"`
 }
 
-// ServerConfig holds listener settings. Use either the plain TCP listener
-// (host/port) or the built-in ngrok tunnel (ngrok.enabled: true) — not both.
+// ServerConfig holds listener settings. Use exactly one of: the plain TCP
+// listener (host/port), the built-in ngrok tunnel (ngrok.enabled: true), or
+// the built-in zrok tunnel (zrok.enabled: true).
 type ServerConfig struct {
 	Host  string      `yaml:"host"`
 	Port  int         `yaml:"port"`
 	Ngrok NgrokConfig `yaml:"ngrok"`
+	Zrok  ZrokConfig  `yaml:"zrok"`
 	// AllowedOrigins is the Origin-header allowlist for the Streamable-HTTP
 	// transport (MCP 2025-11-25 DNS-rebinding defense): a request whose Origin is
 	// present but not listed is rejected with 403. Requests with no Origin header
@@ -45,6 +47,21 @@ type NgrokConfig struct {
 	Enabled   bool      `yaml:"enabled"`
 	Authtoken SecretRef `yaml:"authtoken"`
 	Domain    string    `yaml:"domain"` // optional reserved domain (e.g. my-host.ngrok.app)
+}
+
+// ZrokConfig enables the built-in zrok tunnel, an alternative to ngrok. When
+// enabled, the server uses the zrok Go SDK in-process to enable an ephemeral
+// zrok environment, open a public proxy share, and serve over it — no external
+// `zrok` process and no `zrok enable` state on this machine. The SDK is driven
+// entirely from this config + secret refs, never from zrok's ambient
+// environment (~/.zrok or ZROK_* env vars). The public URL is logged at
+// startup; the share and the ephemeral environment are released on shutdown.
+type ZrokConfig struct {
+	Enabled     bool      `yaml:"enabled"`
+	EnableToken SecretRef `yaml:"enableToken"` // zrok account token (the `zrok enable` token); from secrets, never YAML
+	ApiEndpoint string    `yaml:"apiEndpoint"` // optional; defaults to https://api-v2.zrok.io
+	Frontend    string    `yaml:"frontend"`    // optional public frontend namespace; defaults to "public"
+	UniqueName  string    `yaml:"uniqueName"`  // optional stable share name → stable URL across (clean) restarts
 }
 
 // AuthConfig holds authentication settings. Bearer tokens are secret references
@@ -126,6 +143,15 @@ func (c *Config) ResolveNgrokAuthtoken(env map[string]string) (string, error) {
 	return c.Server.Ngrok.Authtoken.Resolve(env)
 }
 
+// ResolveZrokEnableToken resolves the zrok enable (account) token from env.
+// Returns an empty string if zrok is not enabled.
+func (c *Config) ResolveZrokEnableToken(env map[string]string) (string, error) {
+	if !c.Server.Zrok.Enabled {
+		return "", nil
+	}
+	return c.Server.Zrok.EnableToken.Resolve(env)
+}
+
 // ResolveOAuthCredentials returns the OAuth client credentials. clientID comes
 // directly from config; clientSecret is resolved from the env map.
 func (c *Config) ResolveOAuthCredentials(env map[string]string) (clientID, clientSecret string, err error) {
@@ -160,8 +186,11 @@ func LoadConfig(path string) (*Config, error) {
 // one must be configured and each must be at least 32 bytes; in stdio mode tokens
 // are unused and not required.
 func (c *Config) Validate(bearerTokens []string, requireBearer bool) error {
+	if c.Server.Ngrok.Enabled && c.Server.Zrok.Enabled {
+		return fmt.Errorf("server.ngrok and server.zrok are mutually exclusive (each replaces the local TCP listener)")
+	}
 	if requireBearer {
-		if !c.Server.Ngrok.Enabled {
+		if !c.Server.Ngrok.Enabled && !c.Server.Zrok.Enabled {
 			if c.Server.Port < 1 || c.Server.Port > 65535 {
 				return fmt.Errorf("server.port %d out of range (1-65535)", c.Server.Port)
 			}
@@ -177,6 +206,9 @@ func (c *Config) Validate(bearerTokens []string, requireBearer bool) error {
 	}
 	if c.Server.Ngrok.Enabled && !c.Server.Ngrok.Authtoken.set() {
 		return fmt.Errorf("ngrok.authtoken is required when ngrok.enabled is true")
+	}
+	if c.Server.Zrok.Enabled && !c.Server.Zrok.EnableToken.set() {
+		return fmt.Errorf("zrok.enableToken is required when zrok.enabled is true")
 	}
 	if len(c.Workspaces) == 0 {
 		return fmt.Errorf("at least one workspace is required")

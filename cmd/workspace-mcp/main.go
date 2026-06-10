@@ -87,6 +87,9 @@ func run() error {
 
 	handler := mcp.BuildHandler(reg, log, bearerTokens, oauthServer, cfg.Server.AllowedOrigins)
 
+	if cfg.Server.Zrok.Enabled {
+		return serveZrok(cfg, env, handler, log)
+	}
 	if cfg.Server.Ngrok.Enabled {
 		return serveNgrok(context.Background(), cfg, env, handler, log)
 	}
@@ -118,6 +121,7 @@ func serveNgrok(ctx context.Context, cfg *mcp.Config, env map[string]string, han
 		return fmt.Errorf("ngrok listen: %w", err)
 	}
 	log.Slog().Info("starting via ngrok", "url", listener.URL(), "workspaces", len(cfg.Workspaces))
+	logWorkspaceURLs(log, "ngrok", []string{listener.URL()}, cfg)
 	return http.Serve(listener, handler)
 }
 
