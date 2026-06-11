@@ -28,7 +28,7 @@ import (
 // true only when the server is fronted by a tunnel that terminates the client
 // and injects X-Forwarded-For (zrok), false for ngrok/direct where RemoteAddr is
 // the real peer. See Bearer.clientAddr.
-func BuildHandler(reg *Registry, log *Logger, bearerTokens []string, oauthServer *OAuthServer, allowedOrigins []string, trustForwardedFor bool) http.Handler {
+func BuildHandler(reg *Registry, log *Logger, bearerTokens []string, oauthServer *OAuthServer, allowedOrigins []string, trustForwardedFor bool, version string) http.Handler {
 	bearer := NewBearer(bearerTokens, log, trustForwardedFor)
 	if oauthServer != nil {
 		// With OAuth on, an unauthenticated request gets a WWW-Authenticate header
@@ -53,7 +53,7 @@ func BuildHandler(reg *Registry, log *Logger, bearerTokens []string, oauthServer
 
 	// One MCP endpoint per workspace; the path segment selects the os.Root/policy.
 	for _, ws := range reg.List() {
-		srv := NewServer(ws, log)
+		srv := NewServer(ws, log, version)
 		rpc := jsonrpc.NewEndpoint()
 		srv.Register(rpc)
 		mux.Handle("POST /mcp/"+ws.Name, endpoint.Handler(rpc.Endpoint, origin, bearer, log))

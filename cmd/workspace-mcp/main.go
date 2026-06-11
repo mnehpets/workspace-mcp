@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime/debug"
 
 	"github.com/mnehpets/http/endpoint"
 	"github.com/mnehpets/http/jsonrpc"
@@ -22,6 +23,59 @@ import (
 
 	"github.com/mnehpets/workspace-mcp/mcp"
 )
+
+// version is the build version string. Set via -X flag for tagged releases:
+//
+//	go build -ldflags="-X main.version=v1.2.3"
+//
+// Otherwise buildVersion() derives it from runtime/debug build info.
+var version = "(devel)"
+
+// buildVersion returns the effective version string: the ldflags override when
+// set, else a VCS stamp (short hash + dirty flag) from the embedded build info.
+func buildVersion() string {
+	if version != "(devel)" {
+		return version
+	}
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return version
+	}
+	// Module version from `go install …@vX.Y.Z`; skip the synthetic "(devel)" value.
+	if mv := bi.Main.Version; mv != "" && mv != "(devel)" {
+		if rev, dirty := vcsStamp(bi); rev != "" {
+			if dirty {
+				return mv + " (" + rev + ", dirty)"
+			}
+			return mv + " (" + rev + ")"
+		}
+		return mv
+	}
+	// No tagged module version — use the VCS stamp alone.
+	if rev, dirty := vcsStamp(bi); rev != "" {
+		if dirty {
+			return rev + " (dirty)"
+		}
+		return rev
+	}
+	return version
+}
+
+// vcsStamp extracts the short commit hash and dirty flag from build settings.
+func vcsStamp(bi *debug.BuildInfo) (rev string, dirty bool) {
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+			if len(rev) > 8 {
+				rev = rev[:8]
+			}
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	return
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -35,7 +89,14 @@ func run() error {
 	envPath := flag.String("env", "./secrets.env", "path to dotenv secrets file")
 	stdio := flag.Bool("stdio", false, "run as a local stdio MCP server (no HTTP, no bearer auth)")
 	workspace := flag.String("workspace", "", "in -stdio mode, the single workspace to serve (required when more than one is configured; HTTP mode serves all via per-route endpoints)")
+	printVersion := flag.Bool("version", false, "print the build version and exit")
 	flag.Parse()
+
+	v := buildVersion()
+	if *printVersion {
+		fmt.Println(v)
+		return nil
+	}
 
 	cfg, err := mcp.LoadConfig(*configPath)
 	if err != nil {
@@ -81,8 +142,8 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		log.Slog().Info("starting stdio", "workspace", ws.Name)
-		return serveStdio(mcp.NewServer(ws, log), log)
+		log.Slog().Info("starting stdio", "workspace", ws.Name, "version", v)
+		return serveStdio(mcp.NewServer(ws, log, v), log)
 	}
 
 	// Only the zrok frontend terminates the client connection and forwards over
@@ -90,24 +151,24 @@ func run() error {
 	// address there; ngrok and direct TCP preserve it in RemoteAddr. Decide the
 	// trust here, where the active tunnel is known, rather than sniffing per-request.
 	trustForwardedFor := cfg.Server.Zrok.Enabled
-	handler := mcp.BuildHandler(reg, log, bearerTokens, oauthServer, cfg.Server.AllowedOrigins, trustForwardedFor)
+	handler := mcp.BuildHandler(reg, log, bearerTokens, oauthServer, cfg.Server.AllowedOrigins, trustForwardedFor, v)
 
 	if cfg.Server.Zrok.Enabled {
 		return serveZrok(cfg, env, handler, log)
 	}
 	if cfg.Server.Ngrok.Enabled {
-		return serveNgrok(context.Background(), cfg, env, handler, log)
+		return serveNgrok(context.Background(), cfg, env, handler, log, v)
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
-	log.Slog().Info("starting", "addr", addr, "workspaces", len(cfg.Workspaces))
+	log.Slog().Info("starting", "addr", addr, "workspaces", len(cfg.Workspaces), "version", v)
 	srv := &http.Server{Addr: addr, Handler: handler}
 	return srv.ListenAndServe()
 }
 
 // serveNgrok dials ngrok and serves the handler over the resulting tunnel.
 // The tunnel URL is logged at startup and requires no external ngrok process.
-func serveNgrok(ctx context.Context, cfg *mcp.Config, env map[string]string, handler http.Handler, log *mcp.Logger) error {
+func serveNgrok(ctx context.Context, cfg *mcp.Config, env map[string]string, handler http.Handler, log *mcp.Logger, version string) error {
 	authtoken, err := cfg.ResolveNgrokAuthtoken(env)
 	if err != nil {
 		return fmt.Errorf("resolve ngrok authtoken: %w", err)
@@ -125,7 +186,7 @@ func serveNgrok(ctx context.Context, cfg *mcp.Config, env map[string]string, han
 	if err != nil {
 		return fmt.Errorf("ngrok listen: %w", err)
 	}
-	log.Slog().Info("starting via ngrok", "url", listener.URL(), "workspaces", len(cfg.Workspaces))
+	log.Slog().Info("starting via ngrok", "url", listener.URL(), "workspaces", len(cfg.Workspaces), "version", version)
 	logWorkspaceURLs(log, "ngrok", []string{listener.URL()}, cfg)
 	return http.Serve(listener, handler)
 }

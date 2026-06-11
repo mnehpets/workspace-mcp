@@ -17,9 +17,6 @@ import (
 
 const serverName = "workspace-mcp"
 
-// serverVersion is reported in initialize.
-const serverVersion = "0.1.0"
-
 // supportedProtocols lists MCP protocol versions we understand, newest first.
 var supportedProtocols = []string{"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
 
@@ -28,13 +25,14 @@ var supportedProtocols = []string{"2025-11-25", "2025-06-18", "2025-03-26", "202
 // endpoint per workspace, §17), so the tools take no `workspace` argument and the
 // instructions are workspace-specific.
 type Server struct {
-	ws  *Workspace
-	log *Logger
+	ws      *Workspace
+	log     *Logger
+	version string // reported in initialize and workspace_info
 }
 
 // NewServer builds a Server bound to one workspace.
-func NewServer(ws *Workspace, log *Logger) *Server {
-	return &Server{ws: ws, log: log}
+func NewServer(ws *Workspace, log *Logger, version string) *Server {
+	return &Server{ws: ws, log: log, version: version}
 }
 
 // Register wires the MCP methods onto a jsonrpc endpoint.
@@ -99,18 +97,12 @@ Editing (only when the user asks you to change files): file_create writes a new 
 {{end -}}
 Constraints: {{if .Writable}}create/overwrite/replace are the only mutations — no shell, no git mutation, no delete/move/rename.{{else}}read-only (no writes, shell, or git mutation exist).{{end}} Access is default-deny — some paths are intentionally invisible, so a NOT_FOUND or POLICY_DENIED is an expected answer, not a transient error to retry. All paths are workspace-relative; absolute paths and ".." are rejected.`))
 
-// workspaceInstructions renders the `instructions` string for one workspace. It
-// is best-effort: the spec lets servers send it, but general-purpose hosts may
-// ignore it — so the tool descriptions and the workspace_info ("start here") tool
-// must stand on their own too.
-func workspaceInstructions(ws *Workspace) string {
+// renderInstructions renders the instructions template for the given data.
+// It is the inner helper used by both workspaceInstructions (startup data) and
+// workspaceInfo (fresh data for dynamic refresh, task 25).
+func renderInstructions(d instructionsData) string {
 	var b strings.Builder
-	if err := instructionsTemplate.Execute(&b, instructionsData{
-		Description:    ws.Description,
-		WellKnownFiles: strings.Join(ws.WellKnownFiles, ", "),
-		IsGitRepo:      ws.IsGitRepo,
-		Writable:       ws.Write.Enabled,
-	}); err != nil {
+	if err := instructionsTemplate.Execute(&b, d); err != nil {
 		// The template is a compile-time constant with trivial fields; an execution
 		// error is impossible in practice. Degrade to empty rather than panic.
 		return ""
@@ -118,12 +110,25 @@ func workspaceInstructions(ws *Workspace) string {
 	return b.String()
 }
 
+// workspaceInstructions renders the `instructions` string for one workspace
+// using its startup-time cached fields. It is best-effort: the spec lets servers
+// send it, but general-purpose hosts may ignore it — so the tool descriptions
+// and the workspace_info ("start here") tool must stand on their own too.
+func workspaceInstructions(ws *Workspace) string {
+	return renderInstructions(instructionsData{
+		Description:    ws.Description,
+		WellKnownFiles: strings.Join(ws.WellKnownFiles, ", "),
+		IsGitRepo:      ws.IsGitRepo,
+		Writable:       ws.Write.Enabled,
+	})
+}
+
 // Initialize negotiates a protocol version and advertises the tools capability.
 func (s *Server) Initialize(_ context.Context, p InitializeParams) (InitializeResult, error) {
 	return InitializeResult{
 		ProtocolVersion: negotiateProtocol(p.ProtocolVersion),
 		Capabilities:    map[string]any{"tools": map[string]any{}},
-		ServerInfo:      serverInfo{Name: serverName, Version: serverVersion},
+		ServerInfo:      serverInfo{Name: serverName, Version: s.version},
 		Instructions:    workspaceInstructions(s.ws),
 	}, nil
 }

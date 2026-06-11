@@ -18,16 +18,17 @@ var ErrUnknownWorkspace = errors.New("unknown workspace")
 
 // Workspace is one configured directory tree and its per-workspace settings.
 type Workspace struct {
-	Name           string
-	Root           *Root
-	Policy         *Policy
-	Ignore         *grrep.IgnoreSet // nil when respectGitignore is disabled
-	IsGitRepo      bool
-	Read           ReadConfig
-	Grep           GrepConfig
-	Write          WriteConfig
-	Description    string   // what the tree is for; config-supplied or README-derived. May be empty.
-	WellKnownFiles []string // orientation files present at the root (subset of wellKnownCandidates).
+	Name                 string
+	Root                 *Root
+	Policy               *Policy
+	Ignore               *grrep.IgnoreSet // nil when respectGitignore is disabled
+	IsGitRepo            bool
+	Read                 ReadConfig
+	Grep                 GrepConfig
+	Write                WriteConfig
+	Description          string   // what the tree is for; config-supplied or README-derived. May be empty.
+	HasConfigDescription bool     // true when Description came from config (authoritative; never refreshed)
+	WellKnownFiles       []string // orientation files present at the root; cached at startup for initialize.
 }
 
 // Registry maps workspace names to their resolved Workspace.
@@ -66,7 +67,8 @@ func Build(cfg *Config) (*Registry, error) {
 		// os.Root + policy: a blocked/missing file simply contributes nothing.
 		ws.WellKnownFiles = detectOrientation(root, pol)
 		if wc.Description != "" {
-			ws.Description = wc.Description // config is authoritative
+			ws.Description = wc.Description // config is authoritative; never refreshed
+			ws.HasConfigDescription = true
 		} else {
 			ws.Description = deriveDescription(root, ws.WellKnownFiles)
 		}

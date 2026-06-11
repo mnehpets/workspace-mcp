@@ -34,7 +34,7 @@ func TestStdioLoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := mcp.NewServer(ws, mcp.NewLogger("error", &bytes.Buffer{}))
+	server := mcp.NewServer(ws, mcp.NewLogger("error", &bytes.Buffer{}), "(test)")
 	rpc := jsonrpc.NewEndpoint()
 	server.Register(rpc)
 	handler := endpoint.Handler(rpc.Endpoint)
@@ -117,5 +117,14 @@ func TestSelectStdioWorkspace(t *testing.T) {
 	// Unknown name → error.
 	if _, err := selectStdioWorkspace(two, "nope"); err == nil {
 		t.Fatal("-workspace with unknown name should error")
+	}
+}
+
+// TestBuildVersion confirms buildVersion returns a non-empty string regardless of
+// whether the binary was built with ldflags or from source.
+func TestBuildVersion(t *testing.T) {
+	v := buildVersion()
+	if v == "" {
+		t.Fatal("buildVersion must return a non-empty string")
 	}
 }

@@ -114,7 +114,9 @@ func (s *Server) toolDefs() []Tool {
 		},
 		{
 			Name: "git_status",
-			Description: "Show read-only git status — current branch and per-file change codes — when this workspace is a git repository (otherwise returns NOT_A_GIT_REPO). " +
+			Description: "Show read-only git status — current branch, per-file change codes, and upstream tracking info — when this workspace is a git repository (otherwise returns NOT_A_GIT_REPO). " +
+				"The `upstream` field reports how many commits the local branch is ahead/behind its remote-tracking ref; it is null when no tracking branch is configured or the remote was never fetched. " +
+				"Counts are as of the last fetch — no network call is made. " +
 				"Orientation only: it neither reads file contents nor modifies anything. No parameters.",
 			InputSchema: schema(map[string]any{}),
 			Annotations: readOnlyAnnotations("Git status"),
@@ -205,25 +207,43 @@ func unmarshalArgs(raw json.RawMessage, v any) error {
 
 // --- workspace_info ---
 
-// workspaceInfo returns this workspace's orientation — deliberately the *same*
-// payload delivered at initialize as `instructions` (§17). It exists as the
-// dependable tool-surface mirror for hosts that ignore the server `instructions`
-// string: `orientation` is that exact text, and the structured fields (name,
-// git-ness, description, detected orientation files) are the machine-readable
-// source the prose is built from. When a well-known file exists it also inlines a
-// capped preview of the highest-priority one, so the common "orient by reading the
-// README" move needs no follow-up file_read round-trip.
+// workspaceInfo returns this workspace's orientation. It scans the tree root
+// fresh on every call (task 25) so that a README or other well-known file added
+// through the write tools shows up without a server restart. The `orientation`
+// text is rebuilt from the fresh data, so it may differ from the startup-time
+// `instructions` in `initialize` if the tree changed. When a well-known file
+// exists it inlines a capped preview so the "read the README" move needs no
+// follow-up file_read round-trip.
 func (s *Server) workspaceInfo(_ json.RawMessage) (any, ToolEvent, error) {
 	ev := ToolEvent{}
 	w := s.ws
+
+	// Scan fresh: reflect any files created/deleted since startup.
+	freshFiles := detectOrientation(w.Root, w.Policy)
+
+	// Description: config-supplied is authoritative and never refreshed;
+	// README-derived is re-derived from the fresh file list.
+	desc := w.Description
+	if !w.HasConfigDescription {
+		desc = deriveDescription(w.Root, freshFiles)
+	}
+
+	orientation := renderInstructions(instructionsData{
+		Description:    desc,
+		WellKnownFiles: strings.Join(freshFiles, ", "),
+		IsGitRepo:      w.IsGitRepo,
+		Writable:       w.Write.Enabled,
+	})
+
 	out := map[string]any{
 		"name":           w.Name,
 		"isGitRepo":      w.IsGitRepo,
-		"description":    w.Description,
-		"wellKnownFiles": w.WellKnownFiles,
-		"orientation":    workspaceInstructions(w),
+		"description":    desc,
+		"wellKnownFiles": freshFiles,
+		"orientation":    orientation,
+		"version":        s.version,
 	}
-	if p := readOrientationPreview(w); p != nil {
+	if p := readOrientationPreview(w, freshFiles); p != nil {
 		out["preview"] = p
 		ev.Paths = []string{p.Path}
 		ev.Bytes = len(p.Content)
@@ -245,15 +265,15 @@ type orientationPreview struct {
 	TotalLines int    `json:"totalLines,omitempty"` // only when the whole file fit the byte window
 }
 
-// readOrientationPreview reads the first previewMaxLines (capped by bytes) of the
-// workspace's highest-priority well-known file, through its os.Root. The file was
-// already policy-gated at detection (detectOrientation). Returns nil when there is
-// no well-known file, the read fails, or the content looks binary.
-func readOrientationPreview(w *Workspace) *orientationPreview {
-	if len(w.WellKnownFiles) == 0 {
+// readOrientationPreview reads the first previewMaxLines (capped by bytes) of
+// the highest-priority file in files, through the workspace's os.Root. Files
+// must already be policy-gated (detectOrientation ensures this). Returns nil
+// when files is empty, the read fails, or the content looks binary.
+func readOrientationPreview(w *Workspace, files []string) *orientationPreview {
+	if len(files) == 0 {
 		return nil
 	}
-	name := w.WellKnownFiles[0]
+	name := files[0]
 	limit := int64(previewMaxBytes)
 	if w.Read.MaxBytes > 0 && w.Read.MaxBytes < limit {
 		limit = w.Read.MaxBytes

@@ -158,3 +158,99 @@ func TestOrientationDescriptionPriority(t *testing.T) {
 		t.Errorf("with no README, description should come from index, got %q", ws2.Description)
 	}
 }
+
+// --- Task 25: workspace_info reflects on-disk state dynamically ---
+
+// buildTask25Fixture builds a registry+fixture rooted at dir with the given
+// allow globs and config description, suitable for workspace_info round-trips.
+func buildTask25Fixture(t *testing.T, dir string, allow []string, desc string) *mcpFixture {
+	t.Helper()
+	reg, err := mcp.Build(&mcp.Config{Workspaces: []mcp.WorkspaceConfig{{
+		Name:        "default",
+		Root:        dir,
+		Description: desc,
+		Policy:      mcp.PolicyConfig{AllowGlobs: allow},
+		Read:        mcp.ReadConfig{MaxBytes: 100000},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(reg.Close)
+	return newMCPFixture(t, reg)
+}
+
+// TestWorkspaceInfoReflectsNewReadme exercises the core task-25 scenario: a
+// workspace that starts with no README gains one (simulating file_create), and the
+// next workspace_info call reflects it without a server restart.
+func TestWorkspaceInfoReflectsNewReadme(t *testing.T) {
+	dir := t.TempDir()
+	f := buildTask25Fixture(t, dir, []string{"**/*.md"}, "")
+
+	// Confirm startup state: no well-known files, no description, no preview.
+	var before struct {
+		WellKnownFiles []string `json:"wellKnownFiles"`
+		Description    string   `json:"description"`
+		Preview        any      `json:"preview"`
+	}
+	f.callTool(t, "workspace_info", map[string]any{}, &before)
+	if len(before.WellKnownFiles) != 0 {
+		t.Errorf("expected no well-known files before README, got %v", before.WellKnownFiles)
+	}
+	if before.Preview != nil {
+		t.Errorf("expected no preview before README, got %v", before.Preview)
+	}
+
+	// Write a README (simulates file_create through the write tools).
+	if err := os.WriteFile(filepath.Join(dir, "README.md"),
+		[]byte("# My Project\nThis is the intro.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same server session, no restart: workspace_info must reflect the new file.
+	var after struct {
+		WellKnownFiles []string `json:"wellKnownFiles"`
+		Description    string   `json:"description"`
+		Preview        *struct {
+			Path    string `json:"path"`
+			Content string `json:"content"`
+		} `json:"preview"`
+	}
+	f.callTool(t, "workspace_info", map[string]any{}, &after)
+	if len(after.WellKnownFiles) == 0 || after.WellKnownFiles[0] != "README.md" {
+		t.Errorf("expected README.md in wellKnownFiles after create, got %v", after.WellKnownFiles)
+	}
+	if after.Description == "" {
+		t.Error("expected non-empty description derived from the new README")
+	}
+	if after.Preview == nil {
+		t.Fatal("expected a preview after README was created")
+	}
+	if after.Preview.Path != "README.md" || !strings.Contains(after.Preview.Content, "This is the intro") {
+		t.Errorf("preview wrong after create: %+v", after.Preview)
+	}
+}
+
+// TestWorkspaceInfoConfigDescriptionNeverRefreshed confirms that a config-supplied
+// description is authoritative and never overridden when the README changes.
+func TestWorkspaceInfoConfigDescriptionNeverRefreshed(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"),
+		[]byte("# R\nreadme intro\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := buildTask25Fixture(t, dir, []string{"**/*.md"}, "config wins")
+
+	// Overwrite the README after startup.
+	if err := os.WriteFile(filepath.Join(dir, "README.md"),
+		[]byte("# R\ncompletely different content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var wi struct {
+		Description string `json:"description"`
+	}
+	f.callTool(t, "workspace_info", map[string]any{}, &wi)
+	if wi.Description != "config wins" {
+		t.Errorf("config-supplied description should be immutable, got %q", wi.Description)
+	}
+}

@@ -16,8 +16,9 @@ type FileStatus struct {
 
 // Status is the read-only status of a git workspace.
 type Status struct {
-	Branch string       `json:"branch"`
-	Files  []FileStatus `json:"files"`
+	Branch   string        `json:"branch"`
+	Files    []FileStatus  `json:"files"`
+	Upstream *UpstreamInfo `json:"upstream,omitempty"` // nil when no tracking branch is configured
 }
 
 // GetStatus returns the current branch and per-file status. dir must be a git
@@ -42,6 +43,7 @@ func GetStatus(dir string) (*Status, error) {
 	out := &Status{}
 	if head, err := repo.Head(); err == nil {
 		out.Branch = head.Name().Short()
+		out.Upstream = resolveUpstream(repo, out.Branch)
 	}
 	for path, s := range st {
 		out.Files = append(out.Files, FileStatus{

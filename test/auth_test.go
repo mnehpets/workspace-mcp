@@ -100,7 +100,8 @@ func TestBearerNoTokensRejectsAll(t *testing.T) {
 }
 
 // The token must never appear in the audit log, on success or failure.
-func TestBearerTokenNeverLogged(t *testing.T) {	var buf bytes.Buffer
+func TestBearerTokenNeverLogged(t *testing.T) {
+	var buf bytes.Buffer
 	log := mcp.NewLogger("info", &buf)
 	h := protectedHandler(log)
 

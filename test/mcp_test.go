@@ -139,3 +139,38 @@ func TestUnknownToolRejected(t *testing.T) {
 		t.Fatal("expected JSON-RPC error for unknown tool name")
 	}
 }
+
+// Task 24: initialize must carry a non-empty serverInfo.version.
+func TestInitializeReportsVersion(t *testing.T) {
+	reg, _, _ := twoWorkspaceRegistry(t)
+	f := newMCPFixture(t, reg)
+	rr := f.call(t, "initialize", map[string]any{"protocolVersion": "2025-06-18"})
+	if rr.Error != nil {
+		t.Fatalf("initialize error: %+v", rr.Error)
+	}
+	var res struct {
+		ServerInfo struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		} `json:"serverInfo"`
+	}
+	if err := json.Unmarshal(rr.Result, &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.ServerInfo.Version == "" {
+		t.Error("initialize serverInfo.version must be non-empty")
+	}
+}
+
+// Task 24: workspace_info must carry a non-empty version field.
+func TestWorkspaceInfoReportsVersion(t *testing.T) {
+	reg, _, _ := twoWorkspaceRegistry(t)
+	f := newMCPFixture(t, reg)
+	var wi struct {
+		Version string `json:"version"`
+	}
+	f.callTool(t, "workspace_info", map[string]any{}, &wi)
+	if wi.Version == "" {
+		t.Error("workspace_info.version must be non-empty")
+	}
+}
