@@ -201,7 +201,9 @@ grrep/               Vendored from bep/grrep (Apache-2.0, SPDX retained, see
                      CLI stdout; ignore.go = IgnoreSet (nested .gitignore/.ignore).
 
 gitaware/            go-git (pure Go) git-awareness, metadata only. detect.go
-                     (is it a repo?), status.go (Worktree().Status() + branch),
+                     (is it a repo?), status.go (Worktree().Status() + branch +
+                     upstream tracking), upstream.go (ahead/behind against the
+                     local remote-tracking ref, merge-base walk, no network),
                      tracked.go (tracked-file enumeration). Never a content path.
 
 ```
@@ -361,9 +363,12 @@ Schemas use `additionalProperties: false`. The read tools carry read-only MCP
 
 #### `workspace_info`
 Orientation for *this* workspace (the tree this endpoint is bound to). No params.
-Deliberately returns the **same payload** as the initialize `instructions` string
-(§5.5): `orientation` is that exact text, so the tool is the dependable mirror for
-hosts that ignore server `instructions`. The structured fields are the
+Returns `orientation` — the same text as the initialize `instructions` string
+(§5.5) **as of the time of the call** — so the tool is the dependable mirror for
+hosts that ignore server `instructions`. Because `workspace_info` re-scans the tree
+root on every call (task 25), `orientation` reflects the current on-disk state and
+may differ from the connect-time `instructions` if well-known files (README, etc.)
+were added or changed since the session started. The structured fields are the
 machine-readable source the prose is built from. It is *not* a mandated first call
 — a host that surfaced `instructions` already has everything here.
 - **out** `{ "name": string, "isGitRepo": bool, "description": string,
@@ -465,10 +470,19 @@ search over the vendored grrep core.
 
 #### `git_status`
 Read-only status, git-repo workspaces only.
-- **in** `workspace`
-- **out** `{ "branch": string, "files": [ { "path": string, "status": string } ] }`
+- **in** (none)
+- **out** `{ "branch": string, "files": [ { "path": string, "status": string } ],
+  "upstream"?: { "ref": string, "ahead": int, "behind": int, "inSync": bool,
+  "capped"?: bool } }`
 - go-git `Worktree().Status()` + `repo.Head()`; non-git workspace → `NOT_A_GIT_REPO`.
-  No mutation, no `git` binary. ([mcp/tools.go:438])
+  No mutation, no `git` binary. ([mcp/tools.go], [gitaware/status.go])
+- **`upstream`** — present only when a tracking branch is configured and its
+  remote-tracking ref exists locally. Reports how many commits the local branch is
+  ahead and behind `ref` (e.g. `refs/remotes/origin/main`). **Counts are as of the
+  last fetch — no network call is made.** `inSync` is true when both counts are zero.
+  `capped: true` means the walk hit the 1000-commit limit and counts are lower bounds.
+  `upstream` is `null` (omitted) when no upstream is configured, the tracking ref has
+  never been fetched, HEAD is detached, or the branch has no commits. ([gitaware/upstream.go])
 
 #### `git_diff`
 Read-only working-tree diff, git-repo workspaces only — the content companion to
@@ -596,11 +610,12 @@ general-purpose hosts may ignore any one of them.
 - **Tool descriptions** ([mcp/tools.go]) — each says *what* it does, *when* to
   reach for it, and its *boundary vs siblings* (e.g. `tree_search` = locate by
   path glob and/or content; `file_read` follows the locator).
-  `workspace_info` returns the **same orientation** as `instructions` (its
-  `orientation` field is that exact text) — the tool-surface mirror that survives
-  a host dropping `instructions`. Because the orientation (`description` +
-  `wellKnownFiles`) is already embedded in `instructions`, it is *not* advertised
-  as a mandated first call: a host that surfaced `instructions` already has it.
+  `workspace_info` returns `orientation` — the same text as `instructions` **as of
+  the call** (it re-scans the tree root each time, so a README written mid-session
+  appears immediately without a restart) — the tool-surface mirror that survives a
+  host dropping `instructions`. Because the orientation is already embedded in
+  `instructions`, it is *not* advertised as a mandated first call: a host that
+  surfaced `instructions` already has it; call it when you need fresh state.
 - **Tool annotations** ([mcp/tools.go]) — every tool carries MCP
   `{ readOnlyHint: true, openWorldHint: false }` plus a human `title`. A
   machine-readable restatement of "this only reads, and only from the local

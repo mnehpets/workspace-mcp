@@ -885,6 +885,136 @@ security control.
   non-dotfile, and the design doc states the semantics and the policy-is-the-boundary
   caveat.
 
+### 24. Version string — print locally and expose to the client/model
+There's currently no way to tell *which build* is running behind the connector — the
+"is the server actually restarted with my new tool?" problem (hit live: a new tool
+had to be inferred from behavior rather than read off a version). Surface a version in
+two places: (a) printed locally for the operator (CLI + startup log), and (b) visible
+to the model so it/the user can confirm the live build mid-session.
+
+- [x] **Version source — pure stdlib, no build tooling.** `var version = "(devel)"`
+      in [cmd/workspace-mcp/main.go], overridable via `-X main.version=vX.Y.Z`.
+      `buildVersion()` falls back to `runtime/debug.ReadBuildInfo()`: module version
+      from `go install …@vX.Y.Z`, else short VCS hash + dirty flag from the embedded
+      build info.
+- [x] **Local printout.** `-version` flag prints and exits 0. Version folded into
+      every startup log line (`addr=…`, `starting stdio`, `starting via ngrok`).
+- [x] **Client visibility — MCP `initialize`.** `serverInfo.version` populated from
+      `buildVersion()` ([mcp/server.go]); `Server` carries it as a field so both the
+      HTTP and stdio paths report the same string.
+- [x] **Model visibility.** `version` field added to `workspace_info` output
+      ([mcp/tools.go]) — the reliable channel since `workspace_info` is read directly
+      by the model. `serverInfo` and `instructions` are protocol-level; the tool
+      result is the guaranteed path.
+- [x] **Research: does MCP define a standard version-fetch call?** ChatGPT surfaces
+      fields labeled "Version name", "Version notes", "version id", and "app id"
+      alongside an MCP connector — **confirmed ChatGPT-internal** (connector
+      registration metadata, not MCP protocol). The MCP spec has no version-query
+      mechanism beyond `initialize`; `serverInfo.version` in the `initialize` response
+      is the correct and only standard hook. Nothing extra needed here.
+- [x] **Test.** `buildVersion()` returns non-empty; `initialize` carries the version
+      in `serverInfo.version`; `workspace_info` includes the `version` field.
+      ([cmd/workspace-mcp/main_test.go], [test/mcp_test.go])
+- **Done when:** `workspace-mcp -version` prints the build version locally, the
+  startup log shows it, `initialize` reports it in `serverInfo.version`, and a
+  `workspace_info` call surfaces it so the model/user can confirm the running build
+  mid-session — without any build tooling beyond `go build`. ✅ Done.
+
+### 25. `workspace_info` orientation is built once at startup — refresh well-known files dynamically
+Observed 2026-06-11, live claude.ai session: after writing a new `README.md` into a
+freshly-init'd workspace via the server's own `file_create`, `workspace_info` kept
+returning an empty `description` and `wellKnownFiles: []` — and no `preview` — until
+the server was *restarted*; only then did the README-derived `description`, the
+`wellKnownFiles` entry, the `preview`, and the orientation line all appear. So the
+orientation snapshot (`description`, well-known file list, `preview`, instructions
+text) is computed at server start and cached for the process lifetime: a file
+created or edited *through the server's own write tools* isn't reflected in
+orientation until a manual restart. That contradicts the write tools being
+first-class (§8.7) — the model can create the very file orientation keys off and
+then get a stale "no such file" view of it — and is the orientation-layer cousin of
+task 24's "is the server actually restarted?" problem. The same staleness likely
+affects per-file frontmatter that orientation summarizes.
+
+- [x] **Characterize the cache.** `detectOrientation` and `deriveDescription` ran
+      once in `Build()` and the results were stored on `Workspace`. Nothing re-read
+      those files after init.
+- [x] **Pick a refresh strategy.** Re-read on each `workspace_info` call (cheapest;
+      it's a low-frequency orientation call, not a hot path). `Workspace` gains
+      `HasConfigDescription bool` to distinguish config-supplied descriptions
+      (authoritative, never refreshed) from README-derived ones (refreshed each call).
+- [x] **Make `workspace_info` reflect current on-disk state.** `workspaceInfo()` now
+      calls `detectOrientation` fresh on every invocation; if not
+      `HasConfigDescription` it re-derives description too. The `renderInstructions`
+      helper (extracted from `workspaceInstructions`) builds fresh orientation text
+      from those live values. Preview already called `readOrientationPreview` per-call;
+      its signature now takes the fresh file list instead of `ws.WellKnownFiles`.
+      `ws.WellKnownFiles` / `ws.Description` remain cached for `initialize`
+      (one-time handshake; startup values are appropriate there).
+- [x] **Stay inside the boundary.** Fresh scans go through the same `os.Root` +
+      policy path as startup: `detectOrientation` respects `pol.CheckFile`, and
+      `readOrientationPreview` opens through `ws.Root`.
+- [x] **Test.** `TestWorkspaceInfoReflectsNewReadme` — workspace starts with no README,
+      gains one via `os.WriteFile`, same session shows updated `wellKnownFiles`,
+      `description`, and `preview` without restart.
+      `TestWorkspaceInfoConfigDescriptionNeverRefreshed` — config-supplied description
+      is immutable even when the README content changes. ([test/orientation_test.go])
+- **Done when:** `workspace_info` returns orientation derived from the *current* tree
+  — creating or editing a README / well-known file through the server is visible on
+  the next call without a restart — within the existing `os.Root` / policy / size
+  bounds. ✅ Done.
+
+### 26. `git_status` upstream tracking — show whether the branch is ahead/behind its remote
+Observed 2026-06-11: `git_status` reports the current branch name (`main`) and the
+per-file change codes, but says nothing about how the branch stands relative to its
+upstream — so "is `main` out of sync with the remote?" (ahead by N unpushed commits,
+behind by M unpulled ones, or diverged) can't be answered from the tool. That's a
+natural orientation question and the companion to the working-tree status already
+surfaced. Read-only, go-git (pure Go), git-repo workspaces only.
+
+**Key decision — no implicit network.** A *truly current* answer requires a `fetch`,
+which is a network op and crosses this server's read-only-local, no-external-binary
+ethos and the §3 git-automation non-goals. So scope this to ahead/behind computed
+against the **local remote-tracking ref** (e.g. `refs/remotes/origin/main`) — i.e.
+the relationship *as of the last fetch* — and document that staleness caveat rather
+than reaching for the network. Whether an explicit opt-in fetch is ever in scope is
+a separate decision (likely not).
+
+- [x] **Resolve upstream.** Read `branch.<name>.remote` + `.merge` for the current
+      branch via `repo.Config()`; if no upstream is configured, return `upstream: null`
+      gracefully — not an error. Construct the tracking ref as
+      `refs/remotes/<remote>/<merge-short>` via `plumbing.NewRemoteReferenceName`.
+      Assumes the standard fetch refspec; non-standard refspecs are a noted limitation.
+- [x] **Compute ahead/behind** between the local branch tip and the remote-tracking
+      ref via go-git (merge-base + commit walk), with **no network fetch**. Counts
+      are "as of last fetch". **Correctness note on ancestor exclusion** (found and
+      fixed in review): the first pass passed merge-base hashes to go-git's `ignore`
+      list, which only marks those exact hashes as visited — it does *not* prevent
+      pushing their ancestors when they're reachable via a merge edge (e.g. a merge
+      commit M with parents [C2, C1] where C1 is also C2's parent: C1 would be
+      counted as ahead despite being in C2's ancestry). The fix pre-walks each merge
+      base via `collectBaseAncestors` into a `seenExternal` map; the walker checks
+      `seenExternal` before pushing any parent, so the full base ancestry is blocked.
+      `TestUpstreamAheadMergeTopology` locks this in. Walk capped at 1000 commits;
+      `capped: true` signals a lower bound.
+- [x] **Surface it.** Folded into `git_status` output as `upstream: { ref, ahead,
+      behind, inSync, capped? }` — same orientation call, no new tool. Staleness
+      caveat in the `git_status` tool description.
+- [x] **Edge cases**: unborn HEAD (no commits → no upstream), detached HEAD,
+      configured upstream whose remote-tracking ref isn't present locally — all return
+      `upstream: null`. Corrupt `CommitObject` also returns `null` rather than a
+      self-contradictory `{ahead:0, behind:0, inSync:false}` partial struct.
+- [x] **Tests** ([test/gitaware_test.go]): ahead-only, behind-only, diverged,
+      in-sync, no-upstream, unborn HEAD — plus the merge-topology regression test
+      (see correctness note above). `setTracking` helper writes fake remote-tracking
+      refs and wires branch config (with stub remote so go-git's config validation
+      passes, and `Branch.Name` set to match the map key).
+- [x] **Docs** ([docs/design.md] §5.3 `git_status`): updated out-spec to include
+      `upstream` with "as of last fetch, no network" semantics.
+- **Done when:** a git workspace's `git_status` reports the branch's ahead/behind
+  standing against its upstream tracking ref as of the last fetch — no network, no
+  `git` binary, no mutation — with no-upstream / unborn / detached handled gracefully
+  and the staleness caveat documented. ✅ Done.
+
 ---
 
 ## 13. Failure modes & error spec
