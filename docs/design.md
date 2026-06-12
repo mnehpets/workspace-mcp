@@ -129,6 +129,41 @@ freely.**
   allow/deny + reason, and byte/match counts — never file contents, never the
   token ([mcp/server.go:154] `ToolsCall` → `s.log.ToolCall(ev)`).
 
+### 2.4 The trust boundary ends at the tunnel frontend
+
+The bearer/OAuth layer and the `os.Root` boundary protect against unauthorized
+callers and path escape, but they say nothing about the *channel* once a
+third-party tunnel fronts it. Both built-in tunnels (ngrok and zrok) terminate
+TLS at **their own edge** — the public certificate is the operator's, not ours.
+So at the point of termination the entire MCP stream is plaintext to the tunnel
+operator: the bearer token, every tool argument, and every byte of file content
+in responses. A malicious or compromised frontend is fully in-path — it can read
+the whole conversation **and** inject or rewrite it (hand the model
+attacker-chosen file contents, or alter a write tool's arguments). This is
+inherent to *any* remote proxy whose cert you don't control; it is not specific
+to zrok.
+
+- **Name takeover — the sharper, zrok-specific variant.** claude.ai persists the
+  connector as `<uniqueName>` + the bearer token and **replays that token on
+  every request**, so whoever answers at that name receives the credential. If
+  the namespace name were first-come / ephemeral, an attacker could claim it
+  during any downtime window — a rebuild, a crash, the gap between `release()`
+  and the next start — and passively harvest the next token claude.ai sends, with
+  no TLS break required. zrok's name reservation being **account-scoped and
+  persistent** closes that window: the name stays ours even while nothing is
+  serving it. This is why [cmd/workspace-mcp/zrok.go] reserves the name
+  idempotently and **never** calls `DeleteShareName` — auto-releasing on shutdown
+  would re-open the takeover window. The durable *name* reservation, not the
+  ephemeral share/environment, is the security boundary.
+- **The only real fix is a frontend whose cert we control** — a reverse proxy on
+  our own domain, terminating TLS on hardware we run, rather than a shared
+  third-party edge. Until then the tunnel operator must be treated as in-path:
+  keep bearer tokens rotatable (§2.3) so a leak is recoverable, bound the token's
+  blast radius, and prefer the no-tunnel deployment (`127.0.0.1:PORT` behind a
+  self-hosted reverse proxy, §6) whenever the workspace contents or the write
+  surface are sensitive. The built-in tunnels optimize for reach and convenience,
+  not for confidentiality against the operator.
+
 ---
 
 ## 3. Division of functionality (package map)
@@ -677,6 +712,11 @@ treat a partial result as complete.
     on the next start by reaping the prior `env-<uniqueName>` environment, and the
     controller's occasional transient 500 on share creation is retried. The public
     per-workspace URLs (`<frontend>/mcp/<name>`) are logged at startup, as with ngrok.
+
+  Both built-in tunnels terminate TLS at the operator's edge, so the operator is
+  in-path on the cleartext stream; the persistent zrok name reservation also
+  guards against credential theft via name takeover. See §2.4 — a self-hosted
+  reverse proxy whose cert we control is the only deployment that closes that gap.
 
   Either way claude.ai reaches the server as a custom connector / remote MCP,
   authenticating via the OAuth 2.0 authorization code flow (`GET /oauth/authorize`
