@@ -101,11 +101,11 @@ func (s *Server) toolDefs() []Tool {
 					"type":        "array",
 					"description": "Content predicates over each file's body, AND-combined: a file is returned only if every predicate matches at least one line. Omit to search by path alone (file enumeration). Requires the workspace's grep to be enabled.",
 					"items": schema(map[string]any{
-						"text":            map[string]any{"type": "string", "description": "Text to search for. A literal substring unless fixedString=false, in which case a Go regular expression."},
-						"fixedString":     map[string]any{"type": "boolean", "description": "Literal substring search (default true). Set false to treat `text` as a regular expression."},
-						"caseInsensitive": map[string]any{"type": "boolean", "description": "Case-insensitive match (default false)."},
-						"wordBoundary":    map[string]any{"type": "boolean", "description": "Match only at word boundaries (default false)."},
-					}, "text"),
+						"text":            map[string]any{"type": "string", "description": "Literal substring to match. Supply this OR `regex`, not both."},
+						"regex":           map[string]any{"type": "string", "description": "Go regular expression (RE2) to match, e.g. \"func\\\\s+\\\\w+\" or \"TODO|FIXME\". Supply this OR `text`, not both — use it instead of `text` whenever you want pattern matching rather than an exact substring."},
+						"caseInsensitive": map[string]any{"type": "boolean", "description": "Case-insensitive match (default false). Applies to `text` or `regex`."},
+						"wordBoundary":    map[string]any{"type": "boolean", "description": "Match only at word boundaries (default false). Applies to `text` or `regex`."},
+					}),
 				},
 				"includeMatches":  map[string]any{"type": "boolean", "description": "Attach the matched lines (line number + text) to each file (default true). Set false to return just the paths."},
 				"includeMetadata": map[string]any{"type": "boolean", "description": "Attach each file's raw, unparsed frontmatter block (the text between leading `---` fences) as `metadata` (default false). No effect on files without a frontmatter fence. Set this when enumerating/browsing (no `where`) to triage by each file's own description — titles, tags, summaries — in one pass, instead of guessing relevance from filenames and then opening files one by one."},
@@ -542,8 +542,8 @@ type treeSearchArgs struct {
 }
 
 type wherePredicate struct {
-	Text            string `json:"text"`
-	FixedString     *bool  `json:"fixedString"`
+	Text            string `json:"text"`  // literal substring; mutually exclusive with Regex
+	Regex           string `json:"regex"` // Go regular expression; mutually exclusive with Text
 	CaseInsensitive bool   `json:"caseInsensitive"`
 	WordBoundary    bool   `json:"wordBoundary"`
 }
@@ -562,16 +562,21 @@ func (s *Server) treeSearch(args json.RawMessage) (any, ToolEvent, error) {
 	}
 	preds := make([]Predicate, 0, len(a.Where))
 	for _, w := range a.Where {
-		if strings.TrimSpace(w.Text) == "" {
-			return nil, ev, newToolError("INVALID_ARGS", "each `where` predicate needs non-empty text")
+		hasText := strings.TrimSpace(w.Text) != ""
+		hasRegex := strings.TrimSpace(w.Regex) != ""
+		switch {
+		case hasText && hasRegex:
+			return nil, ev, newToolError("INVALID_ARGS", "each `where` predicate takes either `text` or `regex`, not both")
+		case !hasText && !hasRegex:
+			return nil, ev, newToolError("INVALID_ARGS", "each `where` predicate needs a non-empty `text` or `regex`")
 		}
-		fixed := true
-		if w.FixedString != nil {
-			fixed = *w.FixedString
+		pattern := w.Text
+		if hasRegex {
+			pattern = w.Regex
 		}
 		preds = append(preds, Predicate{
-			Text:            w.Text,
-			FixedString:     fixed,
+			Text:            pattern,
+			FixedString:     hasText,
 			CaseInsensitive: w.CaseInsensitive,
 			WordBoundary:    w.WordBoundary,
 		})

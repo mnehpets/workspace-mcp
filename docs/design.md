@@ -461,9 +461,9 @@ search over the vendored grrep core.
   a name filter, e.g. `docs/**/*.{md,txt}`; **omit (or `**/*`) for the whole tree**
   — `**` crosses directories, a single `*` does not, so `*` is root-level only),
   `where` (a list of body predicates, **AND-combined** — a file must
-  satisfy every one; each `{ text ★, fixedString` (default **true** = literal
-  substring; false = Go regexp with a literal pre-filter)`, caseInsensitive,
-  wordBoundary }`), `includeMatches` (default **true**), `includeMetadata`
+  satisfy every one; each `{ text | regex` (supply exactly one — `text` is a
+  literal substring, `regex` is a Go regexp with a literal pre-filter)`,
+  caseInsensitive, wordBoundary }`), `includeMatches` (default **true**), `includeMetadata`
   (default **false**)
 - **out** `{ "files": [ { "path": string, "size": int, "matches"?: [ { "line":
   int, "text": string } ], "metadataMatches"?: [ … ], "metadata"?: string } ],
@@ -606,7 +606,7 @@ Domain failures return `isError: true` with `{ code, message, reason? }`
 | `GREP_DISABLED` | `tree_search` with `where` predicates where `grep.enabled` is false | — |
 | `POLICY_DENIED` | path blocked or outside the sandbox | `absolute_path`, `traversal`, `outside_root`, `blocked_glob`, dotfile reason |
 | `NOT_FOUND` | missing path / path is a directory (file_read, file_overwrite, file_replace) | — |
-| `INVALID_PATTERN` | bad regex (`fixedString:false`); no walk performed | — |
+| `INVALID_PATTERN` | bad `regex` predicate; no walk performed | — |
 | `INVALID_ARGS` | arguments fail to unmarshal; empty `old_str` (file_replace); `expected_replacements` < 1 | — |
 | `READ_ONLY` | a write tool called on a workspace without `write.enabled` (also absent from `tools/list`) | — |
 | `PATH_EXISTS` | `file_create` onto an existing path ("use file_overwrite") | — |
