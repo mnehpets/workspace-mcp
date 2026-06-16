@@ -94,6 +94,7 @@ func (s *Server) toolDefs() []Tool {
 				"With `path` alone and no `where` it just enumerates the matching files — use it to discover structure instead of a separate directory listing. To see the whole tree at once, omit `path` (or pass \"**/*\"); use \"*\" only for the root level and \"docs/**\" for a subtree (a single `*` does not cross directories). With `where` it searches their contents like grep. " +
 				"Returns a flat list of files, each with its `size` in bytes and the matched lines (`matches`); set `includeMatches=false` for paths only. " +
 				"Matches inside a leading `---`…`---` frontmatter block are reported separately as `metadataMatches`, and `includeMetadata=true` returns each file's raw frontmatter text — pass it while browsing to read titles/tags/summaries up front and pick the right files in a single call rather than judging by filename. " +
+				"When a matched line alone is too narrow to understand (a function call, a variable reference, a sentence of prose), pass `contextLines` (e.g. 3–5) to include surrounding lines with each match — often lets you answer the question or decide relevance without a follow-up file_read. " +
 				"Results are capped (see `truncated`) — narrow the `path` glob or add a more specific `where` predicate to cut noise.",
 			InputSchema: schema(map[string]any{
 				"path": map[string]any{"type": "string", "description": "Glob selecting candidate files — both the search boundary and a name filter. Omit it (or use \"**/*\") to walk the ENTIRE tree recursively; that is usually what you want for \"show me everything\". `**` crosses directory boundaries, but a single `*` does NOT — so \"*\" lists only the root level, \"docs/*\" only the immediate children of docs/, while \"docs/**\" or \"docs/**/*.md\" reaches all descendants. Prefer `**` unless you deliberately want one level."},
@@ -109,6 +110,7 @@ func (s *Server) toolDefs() []Tool {
 				},
 				"includeMatches":  map[string]any{"type": "boolean", "description": "Attach the matched lines (line number + text) to each file (default true). Set false to return just the paths."},
 				"includeMetadata": map[string]any{"type": "boolean", "description": "Attach each file's raw, unparsed frontmatter block (the text between leading `---` fences) as `metadata` (default false). No effect on files without a frontmatter fence. Set this when enumerating/browsing (no `where`) to triage by each file's own description — titles, tags, summaries — in one pass, instead of guessing relevance from filenames and then opening files one by one."},
+				"contextLines":    map[string]any{"type": "integer", "description": "Lines of body context to include before and after each match (default 0 = matched line only). Use this whenever the matched line alone is ambiguous — e.g. a bare function call, a variable name, or a sentence fragment that only makes sense in context. Each match gains `before` and `after` string arrays. A value of 3–5 covers most code; higher for prose. Not applied to `metadataMatches`. Reach for this any time you would otherwise need a separate file_read just to see what surrounds a match."},
 			}),
 			Annotations: readOnlyAnnotations("Search files by path and content"),
 		},
@@ -539,6 +541,7 @@ type treeSearchArgs struct {
 	Where           []wherePredicate `json:"where"` // body predicates, AND-combined
 	IncludeMatches  *bool            `json:"includeMatches"`
 	IncludeMetadata bool             `json:"includeMetadata"`
+	ContextLines    int              `json:"contextLines"` // lines of body context around each match
 }
 
 type wherePredicate struct {
@@ -593,6 +596,7 @@ func (s *Server) treeSearch(args json.RawMessage) (any, ToolEvent, error) {
 		Where:           preds,
 		IncludeMatches:  includeMatches,
 		IncludeMetadata: a.IncludeMetadata,
+		ContextLines:    a.ContextLines,
 	}, ws.Grep.Workers, ws.Grep.MaxMatches, ws.Read.MaxBytes)
 	if err != nil {
 		return nil, ev, mapSearchError(err)

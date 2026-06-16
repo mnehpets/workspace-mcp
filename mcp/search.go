@@ -50,17 +50,25 @@ type Predicate struct {
 // SearchRequest is a consolidated path+content query. PathGlob is a doublestar
 // glob selecting candidate files ("" = the whole tree); Where holds the body
 // predicates (empty = pure enumeration, no content read or grep needed).
+// ContextLines, when > 0, attaches that many lines before and after each body
+// match (not applied to metadataMatches).
 type SearchRequest struct {
 	PathGlob        string
 	Where           []Predicate
 	IncludeMatches  bool
 	IncludeMetadata bool
+	ContextLines    int
 }
 
 // Line is one matched line within a file (no path — it is implied by the file).
+// Before and After are populated when SearchRequest.ContextLines > 0; they hold
+// the N lines immediately before and after the match, in order. They are omitted
+// for metadataMatches (frontmatter hits) regardless of ContextLines.
 type Line struct {
-	Line int    `json:"line"`
-	Text string `json:"text"`
+	Line   int      `json:"line"`
+	Text   string   `json:"text"`
+	Before []string `json:"before,omitempty"`
+	After  []string `json:"after,omitempty"`
 }
 
 // FileResult is one matched file. Size is the file's byte size (always set, so a
@@ -257,9 +265,36 @@ func scanOne(root *Root, fm fileMeta, matchers []*grrep.Matcher, req SearchReque
 			lines = append(lines, l)
 		}
 		sort.Ints(lines)
+
+		// Split into lines once for context extraction (only when needed).
+		var allLines []string
+		if req.ContextLines > 0 {
+			allLines = strings.Split(string(data), "\n")
+		}
+
 		for _, l := range lines {
 			ln := Line{Line: l, Text: byLine[l]}
-			if hasFence && l > 1 && l < fenceEnd { // strictly inside the fence
+			isMeta := hasFence && l > 1 && l < fenceEnd // strictly inside the fence
+			if req.ContextLines > 0 && !isMeta && len(allLines) > 0 {
+				// Before: lines [l-ctx, l-1] (1-based → 0-based index: l-ctx-1 … l-2).
+				startCtx := l - req.ContextLines
+				if startCtx < 1 {
+					startCtx = 1
+				}
+				for cl := startCtx; cl < l; cl++ {
+					if cl-1 < len(allLines) {
+						ln.Before = append(ln.Before, strings.TrimRight(allLines[cl-1], "\r"))
+					}
+				}
+				// After: lines [l+1, l+ctx] (1-based → 0-based index: l … l+ctx-1).
+				endCtx := l + req.ContextLines
+				for cl := l + 1; cl <= endCtx; cl++ {
+					if cl-1 < len(allLines) {
+						ln.After = append(ln.After, strings.TrimRight(allLines[cl-1], "\r"))
+					}
+				}
+			}
+			if isMeta {
 				fr.MetadataMatches = append(fr.MetadataMatches, ln)
 			} else {
 				fr.Matches = append(fr.Matches, ln)
