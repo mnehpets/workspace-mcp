@@ -592,6 +592,7 @@ workspace-mcp/
     mcphelp_test.go
     orientation_test.go
     policy_test.go
+    result_encoding_test.go      # tool-result encoding: no HTML escaping + structuredContent (§27)
     search_test.go               # tree_search: path glob, where predicates, fence split
     secrets_test.go              # env override + {env:NAME} resolution
     workspace_test.go            # unknown workspace, cross-workspace isolation
@@ -1015,6 +1016,55 @@ a separate decision (likely not).
   `git` binary, no mutation — with no-upstream / unborn / detached handled gracefully
   and the staleness caveat documented. ✅ Done.
 
+### 27. Character escaping in tool results confuses `file_replace` — `<` and `\` mangled
+Observed: search results (and other content-bearing fields — `file_read` content,
+`git_diff`) reach the model with `<` shown as `<` (likewise `>` → `>`,
+`&` → `&`) **and** a single backslash `\` shown as `\\`. The model then copies
+that mangled text into a `file_replace` `old_str`, which no longer matches the real
+file bytes — the practical harm, not just noise.
+
+**Root cause (confirmed by [test/result_encoding_test.go], `go test ./test/ -run TestResult -v`).**
+The server returns **everything as `TextContent` only** — no `structuredContent` at all
+(verified: `ToolResult` had just `Content`/`IsError`). `okResult` ([mcp/server.go])
+`json.Marshal`s the whole result and stuffs that JSON *string* into `TextContent.Text`,
+so the model reads file content through JSON string-escaping:
+- **`<` `>` `&`:** stdlib `json.Marshal` HTML-escapes by default → `<` etc.
+- **`\`:** `json.Marshal` encodes `\`→`\\` (JSON always does).
+
+The JSON-RPC transport layer that wraps the whole envelope is **transparent** — the MCP
+client decodes it before the model reads `content[].text`, so the transport's own
+escaping never reaches the model. The damage is purely from our *self*-serialization of
+the result into the text string.
+
+**Fix (decided): emit `structuredContent` AND keep a clean text block.**
+Per the [MCP spec](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-result),
+a tool result may carry `structuredContent` (a JSON *object*) **and** SHOULD also carry
+the serialized JSON in a `TextContent` block for backwards compatibility. The two halves:
+- **`structuredContent` is the real fix for `\`.** A client decodes the object straight
+  off the wire (the transport's escaping is undone by its JSON parser), so every string
+  value — backslashes included — reaches the model **verbatim**, no JSON-in-JSON.
+  `TestResultStructuredContent` proves `C:\tmp\x` round-trips intact through `file_read`.
+- **`SetEscapeHTML(false)` on the text block fixes `<` `>` `&`** for any text-only client
+  (and is the backwards-compat serialized copy). Backslash stays standard JSON `\\` in
+  the text block — accepted, since the structured path delivers it clean.
+
+- [x] **Reproduce + isolate.** Confirmed the code was `TextContent`-only and that the
+      JSON-RPC transport layer is transparent (the client decodes it), so the damage is
+      our own `okResult` self-serialization. Pinned end-to-end through the HTTP server in
+      [test/result_encoding_test.go].
+- [x] **`SetEscapeHTML(false)` on the text block.** `okResult`/`errorResult` go through
+      a new `marshalResult` helper ([mcp/server.go]) using a `json.Encoder` with HTML
+      escaping off (servers aren't browsers; `<>&` aren't XSS here). Kills `<` etc.
+      Pinned by `TestResultTextBlockNoHTMLEscape`.
+- [x] **Add `structuredContent`.** `ToolResult` gains
+      `StructuredContent any json:"structuredContent,omitempty"`; `okResult` populates
+      it with the result object (alongside the text block). Errors stay text-only.
+      Pinned by `TestResultStructuredContent`.
+- **Done when:** tool results no longer HTML-escape `<` `>` `&` in the text block and
+  also carry a `structuredContent` object that delivers string values (backslashes
+  included) verbatim — both pinned in [test/result_encoding_test.go]. Whether claude.ai
+  consumes `structuredContent` is left unverified by choice; the text-block fix stands
+  regardless, and `outputSchema` declarations remain an optional later add. ✅ Done.
 ---
 
 ## 13. Failure modes & error spec

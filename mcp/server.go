@@ -4,6 +4,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -201,9 +202,16 @@ type TextContent struct {
 }
 
 // ToolResult is the tools/call response.
+//
+// Successful results are returned both ways the MCP spec allows: as
+// StructuredContent (a JSON object a client decodes straight off the wire — no
+// re-escaping, so string values incl. backslashes reach the model verbatim) and,
+// for backwards compatibility (spec SHOULD), as the same payload serialized into a
+// TextContent block. See marshalResult / okResult and PLAN.md §27.
 type ToolResult struct {
-	Content []TextContent `json:"content"`
-	IsError bool          `json:"isError,omitempty"`
+	Content           []TextContent `json:"content"`
+	StructuredContent any           `json:"structuredContent,omitempty"`
+	IsError           bool          `json:"isError,omitempty"`
 }
 
 // toolFunc is a tool handler. It returns the result value, audit metadata, and
@@ -301,16 +309,41 @@ func mapPolicyDenied(reason string) *toolError {
 	return &toolError{Code: "POLICY_DENIED", Message: "denied by policy", Reason: reason}
 }
 
+// marshalResult JSON-encodes a tool-result payload with HTML escaping disabled.
+// The stdlib default escapes '<', '>', and '&' as </>/&; that
+// escaped form ends up verbatim in the text-content block the model reads (the
+// transport layer the client decodes is a separate, transparent layer), which
+// confuses follow-up edits whose old_str is copied from what the model saw. We
+// aren't a browser, so those characters are not XSS vectors here. (Backslash is
+// still encoded as \\ — that's mandatory JSON string escaping, not addressed
+// here; see PLAN.md §27.)
+func marshalResult(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	// Encode appends a trailing newline; drop it to keep the text block tight.
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
 func okResult(v any) ToolResult {
-	b, err := json.Marshal(v)
+	b, err := marshalResult(v)
 	if err != nil {
 		return errorResult(&toolError{Code: "INTERNAL", Message: "encode error"})
 	}
-	return ToolResult{Content: []TextContent{{Type: "text", Text: string(b)}}}
+	// Emit both: StructuredContent (the object, parsed by the client off the wire
+	// with no escaping artifacts) and the serialized text block (spec backwards-compat
+	// SHOULD; also the only thing text-only clients read).
+	return ToolResult{
+		Content:           []TextContent{{Type: "text", Text: string(b)}},
+		StructuredContent: v,
+	}
 }
 
 func errorResult(te *toolError) ToolResult {
-	b, _ := json.Marshal(te)
+	b, _ := marshalResult(te)
 	return ToolResult{Content: []TextContent{{Type: "text", Text: string(b)}}, IsError: true}
 }
 
