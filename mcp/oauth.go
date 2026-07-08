@@ -6,6 +6,14 @@
 // distinct info strings — so the token types are cryptographically
 // non-interchangeable. Auth codes are kept in-memory because they are
 // single-use: we must delete each code on first redemption to prevent replays.
+//
+// The authorize endpoint has no resource-owner login, so it is gated by a
+// single-use "console approval code": generated on each consent-page load and
+// printed to the server's own stderr (never into the page), it must be entered on
+// the consent form before an auth code is issued. That ties approval to operator
+// access to the console and stops an unauthenticated caller from filling the code
+// map (a memory DoS). The map is additionally swept of expired codes on insert and
+// hard-capped as a memory backstop.
 package mcp
 
 import (
@@ -14,10 +22,12 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
+	"fmt"
 	"html/template"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +41,21 @@ const (
 	oauthCodeTTL    = 2 * time.Minute
 	oauthTokenTTL   = time.Hour
 	oauthRefreshTTL = 30 * 24 * time.Hour
+	// oauthNonceTTL is how long a console approval code stays valid. It is also
+	// single-use (cleared on first correct entry), so this bounds only an unused
+	// code's lifetime.
+	oauthNonceTTL = time.Minute
+	// oauthMaxCodes bounds the in-memory auth-code map. The console-nonce gate
+	// already stops a remote attacker from inserting at all, so this only ever
+	// trips under anomalous local use; it is a memory-safety backstop, chosen on
+	// the principle that a bounded auth-code path is better than unbounded growth
+	// that degrades every request.
+	oauthMaxCodes = 256
+	// oauthNonceBytes is the entropy of the console approval code, before base64
+	// encoding. The operator reads it off the console and types it back, so it
+	// trades typeability against brute-force resistance over the short TTL. 9 bytes
+	// (72 bits) is already far beyond a typical 6–8 digit OTP.
+	oauthNonceBytes = 9
 )
 
 // expiryBytes is the size of a token's payload: the expiry as a big-endian
@@ -96,23 +121,94 @@ type authCode struct {
 // OAuthServer implements the OAuth 2.0 authorization code flow for a single
 // registered client. It is safe for concurrent use.
 type OAuthServer struct {
-	clientID         string
+	clientIDHash     [32]byte   // SHA-256 of client id for constant-time comparison
 	clientSecretHash [32]byte   // SHA-256 of client secret for constant-time comparison
 	codec            tokenCodec // access tokens
 	refreshCodec     tokenCodec // refresh tokens — distinct HKDF info, non-interchangeable
-	mu               sync.Mutex
-	codes            map[string]authCode
+	nonceOut         io.Writer  // where the console approval code is printed (os.Stderr in prod)
+	now              func() time.Time
+
+	mu      sync.Mutex
+	codes   map[string]authCode
+	nonce   string    // current console approval code; "" once consumed or never issued
+	nonceAt time.Time // when the current nonce was generated
 }
 
 // NewOAuthServer creates an OAuthServer. clientSecret derives the AEAD keys for
 // both token types and is hashed for validation at the token endpoint.
 func NewOAuthServer(clientID, clientSecret string) *OAuthServer {
 	return &OAuthServer{
-		clientID:         clientID,
+		clientIDHash:     sha256.Sum256([]byte(clientID)),
 		clientSecretHash: sha256.Sum256([]byte(clientSecret)),
 		codec:            newTokenCodec(clientSecret, "workspace-mcp oauth token key"),
 		refreshCodec:     newTokenCodec(clientSecret, "workspace-mcp oauth refresh token key"),
+		nonceOut:         os.Stderr,
+		now:              time.Now,
 		codes:            make(map[string]authCode),
+	}
+}
+
+// WithNonceOutput redirects where the console approval code is printed (default
+// os.Stderr). Used by tests to capture the code the operator would read.
+func (s *OAuthServer) WithNonceOutput(w io.Writer) *OAuthServer {
+	s.nonceOut = w
+	return s
+}
+
+// WithClock overrides the time source (default time.Now), letting tests drive
+// nonce and auth-code expiry deterministically.
+func (s *OAuthServer) WithClock(now func() time.Time) *OAuthServer {
+	s.now = now
+	return s
+}
+
+// clientIDMatches reports whether id equals the configured client id, compared
+// in constant time over fixed-length digests so neither the id's value nor its
+// length leaks via timing.
+func (s *OAuthServer) clientIDMatches(id string) bool {
+	got := sha256.Sum256([]byte(id))
+	return subtle.ConstantTimeCompare(got[:], s.clientIDHash[:]) == 1
+}
+
+// ensureChallengeLocked generates and prints a fresh console approval code when
+// none is active (consumed, never issued, or aged past oauthNonceTTL). It prints
+// ONLY on generation, so repeated page loads within the TTL neither reprint nor
+// rotate. Caller must hold s.mu.
+func (s *OAuthServer) ensureChallengeLocked() {
+	if s.nonce != "" && s.now().Sub(s.nonceAt) <= oauthNonceTTL {
+		return
+	}
+	b := make([]byte, oauthNonceBytes)
+	if _, err := rand.Read(b); err != nil {
+		s.nonce = "" // fail closed: with no valid code the POST cannot succeed
+		return
+	}
+	s.nonce = base64.RawURLEncoding.EncodeToString(b)
+	s.nonceAt = s.now()
+	fmt.Fprintf(s.nonceOut, "\nworkspace-mcp: an OAuth client is requesting authorization.\n"+
+		"To approve, enter this code on the consent page: %s\n\n", s.nonce)
+}
+
+// checkNonceLocked reports whether got matches the active, unexpired console
+// code, compared in constant time. An empty or expired stored nonce never
+// matches. Caller must hold s.mu.
+func (s *OAuthServer) checkNonceLocked(got string) bool {
+	if s.nonce == "" || s.now().Sub(s.nonceAt) > oauthNonceTTL {
+		return false
+	}
+	gh := sha256.Sum256([]byte(got))
+	wh := sha256.Sum256([]byte(s.nonce))
+	return subtle.ConstantTimeCompare(gh[:], wh[:]) == 1
+}
+
+// sweepExpiredLocked drops auth codes past their expiry, reclaiming memory from
+// abandoned (never-redeemed) authorizations. Caller must hold s.mu.
+func (s *OAuthServer) sweepExpiredLocked() {
+	now := s.now()
+	for k, c := range s.codes {
+		if now.After(c.expiry) {
+			delete(s.codes, k)
+		}
 	}
 }
 
@@ -159,6 +255,7 @@ type authorizeParams struct {
 	Scope               string `query:"scope" form:"scope"`
 	CodeChallenge       string `query:"code_challenge" form:"code_challenge"`
 	CodeChallengeMethod string `query:"code_challenge_method" form:"code_challenge_method"`
+	Nonce               string `form:"nonce"` // console approval code, entered on the consent page (POST only)
 }
 
 // Authorize is an endpoint.EndpointFunc[authorizeParams] for /oauth/authorize:
@@ -175,7 +272,7 @@ func (s *OAuthServer) Authorize(w http.ResponseWriter, r *http.Request, p author
 }
 
 func (s *OAuthServer) showApprovePage(p authorizeParams) (endpoint.Renderer, error) {
-	if p.ClientID != s.clientID {
+	if !s.clientIDMatches(p.ClientID) {
 		return nil, endpoint.Error(http.StatusBadRequest, "unknown client_id", nil)
 	}
 	if p.RedirectURI == "" {
@@ -187,6 +284,17 @@ func (s *OAuthServer) showApprovePage(p authorizeParams) (endpoint.Renderer, err
 	if p.CodeChallengeMethod != "" && p.CodeChallengeMethod != "S256" {
 		return oauthRedirectError(p.RedirectURI, "invalid_request", p.State)
 	}
+	return s.renderApprove(p, ""), nil
+}
+
+// renderApprove builds the consent page, ensuring a console approval code is
+// active (generating+printing one if needed). The code itself is NEVER embedded
+// in the page — it goes only to the server console, so approving requires
+// operator access to that console. errMsg is shown after a wrong/expired entry.
+func (s *OAuthServer) renderApprove(p authorizeParams, errMsg string) endpoint.Renderer {
+	s.mu.Lock()
+	s.ensureChallengeLocked()
+	s.mu.Unlock()
 	return &endpoint.HTMLTemplateRenderer{
 		Template: approveTemplate,
 		Values: approveData{
@@ -196,12 +304,13 @@ func (s *OAuthServer) showApprovePage(p authorizeParams) (endpoint.Renderer, err
 			ResponseType:  p.ResponseType,
 			Scope:         p.Scope,
 			CodeChallenge: p.CodeChallenge,
+			Error:         errMsg,
 		},
-	}, nil
+	}
 }
 
 func (s *OAuthServer) issueCode(p authorizeParams) (endpoint.Renderer, error) {
-	if p.ClientID != s.clientID {
+	if !s.clientIDMatches(p.ClientID) {
 		return nil, endpoint.Error(http.StatusBadRequest, "unknown client_id", nil)
 	}
 	if p.RedirectURI == "" {
@@ -214,11 +323,25 @@ func (s *OAuthServer) issueCode(p authorizeParams) (endpoint.Renderer, error) {
 	code := base64.RawURLEncoding.EncodeToString(raw[:])
 
 	s.mu.Lock()
+	// The console approval code gates every insert, so a remote caller (who cannot
+	// read the server console) can never add to s.codes — this is what stops the
+	// unauthenticated map-fill DoS. A wrong/expired entry re-renders the page
+	// rather than erroring, so the operator just re-enters the current code.
+	if !s.checkNonceLocked(p.Nonce) {
+		s.mu.Unlock()
+		return s.renderApprove(p, "Incorrect or expired code. Check the server console and enter the current code."), nil
+	}
+	s.sweepExpiredLocked()
+	if len(s.codes) >= oauthMaxCodes {
+		s.mu.Unlock()
+		return oauthErrorRenderer(http.StatusServiceUnavailable, "temporarily_unavailable", "too many pending authorizations")
+	}
 	s.codes[code] = authCode{
 		redirectURI:   p.RedirectURI,
-		expiry:        time.Now().Add(oauthCodeTTL),
+		expiry:        s.now().Add(oauthCodeTTL),
 		codeChallenge: p.CodeChallenge,
 	}
+	s.nonce = "" // single-use: consumed on first correct entry
 	s.mu.Unlock()
 
 	target, err := url.Parse(p.RedirectURI)
@@ -259,7 +382,7 @@ func (s *OAuthServer) Token(_ http.ResponseWriter, _ *http.Request, p tokenParam
 
 // validateClient checks client_id and client_secret via constant-time comparison.
 func (s *OAuthServer) validateClient(p tokenParams) (endpoint.Renderer, bool) {
-	idOK := p.ClientID == s.clientID
+	idOK := s.clientIDMatches(p.ClientID)
 	got := sha256.Sum256([]byte(p.ClientSecret))
 	secretOK := subtle.ConstantTimeCompare(got[:], s.clientSecretHash[:]) == 1
 	if !idOK || !secretOK {
@@ -280,7 +403,7 @@ func (s *OAuthServer) authCodeGrant(p tokenParams) (endpoint.Renderer, error) {
 	}
 	s.mu.Unlock()
 
-	if !ok || time.Now().After(ac.expiry) {
+	if !ok || s.now().After(ac.expiry) {
 		return oauthErrorRenderer(http.StatusBadRequest, "invalid_grant", "code not found or expired")
 	}
 	if ac.redirectURI != p.RedirectURI {
@@ -354,6 +477,7 @@ type approveData struct {
 	ResponseType  string
 	Scope         string
 	CodeChallenge string
+	Error         string // shown after a wrong/expired console-code entry
 }
 
 var approveTemplate = template.Must(template.New("approve").Parse(`<!DOCTYPE html>
@@ -367,13 +491,17 @@ var approveTemplate = template.Must(template.New("approve").Parse(`<!DOCTYPE htm
 body{font-family:system-ui,sans-serif;max-width:420px;margin:80px auto;padding:0 24px;color:#111}
 h1{font-size:1.15rem;margin-bottom:.4rem}
 p{color:#555;font-size:.9rem;margin:.4rem 0 1.5rem}
+label{display:block;font-size:.85rem;color:#333;margin:0 0 .35rem}
+input[type=text]{width:100%;padding:9px 11px;border:1px solid #ccc;border-radius:7px;font-size:1rem;margin-bottom:1.2rem;font-family:ui-monospace,monospace}
 button{background:#18181b;color:#fff;border:none;padding:10px 22px;border-radius:7px;cursor:pointer;font-size:.95rem;font-weight:500}
 button:hover{background:#27272a}
+.err{color:#b91c1c;font-size:.85rem;margin:-.8rem 0 1.2rem}
 </style>
 </head>
 <body>
 <h1>Authorize <strong>{{.ClientID}}</strong></h1>
-<p>This grants read-only access to your workspace-mcp server.</p>
+<p>This grants read-only access to your workspace-mcp server. To confirm you have
+access to this server, enter the code printed on the server's console.</p>
 <form method="POST" action="/oauth/authorize">
 <input type="hidden" name="client_id" value="{{.ClientID}}">
 <input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
@@ -381,6 +509,9 @@ button:hover{background:#27272a}
 <input type="hidden" name="response_type" value="{{.ResponseType}}">
 <input type="hidden" name="scope" value="{{.Scope}}">
 <input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
+<label for="nonce">Console approval code</label>
+<input type="text" id="nonce" name="nonce" autocomplete="off" autofocus spellcheck="false">
+{{if .Error}}<div class="err">{{.Error}}</div>{{end}}
 <button type="submit">Authorize</button>
 </form>
 </body>

@@ -125,6 +125,24 @@ freely.**
     1 hour, refresh tokens after 30 days; auth codes (held in memory, single-use)
     after 2 minutes. The token endpoint issues a fresh access/refresh pair for both
     the `authorization_code` and `refresh_token` grants ([mcp/oauth.go]).
+  - **Console-approval gate on `/oauth/authorize`.** The authorize endpoint has no
+    resource-owner login, so on its own it would (a) let anyone who reaches the
+    tunnel drive the consent flow and (b) let an unauthenticated caller fill the
+    in-memory auth-code map (a memory-exhaustion DoS, since codes are reclaimed only
+    on redemption). Both are closed by a **console approval code**: on each consent
+    page load the server generates a short code and prints it to *its own stderr*
+    (never into the page), and the POST that issues an auth code is refused unless
+    that code is entered. So approving requires access to the server's console —
+    the operator — and a remote caller can never insert into the code map. The code
+    is single-use (cleared on first correct entry), constant-time compared, and
+    rotates only when consumed or after 1 minute, so page reloads within the window
+    neither reprint nor rotate it. Belt-and-suspenders, the code map is also swept
+    of expired entries on insert and hard-capped ([mcp/oauth.go] `oauthMaxCodes`);
+    with inserts already gated by the console code the cap only ever trips under
+    anomalous local use, so it bounds memory without creating a remote lockout. The
+    `client_id` is likewise constant-time compared. This gate does **not** defend
+    against the in-path tunnel operator (§2.4), who harvests the already-minted
+    access token off the wire without ever touching `/oauth/authorize`.
 - **Audit log:** every call records method, tool, workspace, resolved path(s),
   allow/deny + reason, and byte/match counts — never file contents, never the
   token ([mcp/server.go:154] `ToolsCall` → `s.log.ToolCall(ev)`).
