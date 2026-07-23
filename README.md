@@ -1,15 +1,17 @@
 # workspace-mcp
 
-A standalone Go MCP server that gives the **claude.ai web app** safe, **read-only**
-access to one or more **local directory trees** ("workspaces") over a public
-HTTPS tunnel. A workspace whose tree is a Git repository gains extra, git-aware
-operations (status).
+A standalone Go MCP server that gives the **claude.ai web app** safe access to
+one or more **local directory trees** ("workspaces") over a public HTTPS
+tunnel. A workspace whose tree is a Git repository gains extra, git-aware
+operations (status, diff). Workspaces are **read-only by default**; a workspace
+can opt in to a small, explicit write surface (`file_create` / `file_overwrite`
+/ `file_replace`) — see [Enable writes](#enable-writes-opt-in) below.
 
 It depends on **no other program running locally** — no second process, no
 external binary. The server sandboxes each workspace's directory with Go's
 `os.Root` (symlink- and TOCTOU-safe), applies a per-workspace allow/deny policy
-on top, requires a bearer token, and exposes only a small read-only tool surface.
-Writing is intentionally **not** built yet.
+on top (the same policy gates both reads and writes), and requires a bearer
+token.
 
 The use case is **research and workflow**, not coding — a *web* assistant using a
 local repo (notes, docs, papers, data) as extra context. See **[docs/design.md](docs/design.md)**
@@ -20,7 +22,7 @@ MCP schema. This README is the operational guide.
 claude.ai (web app)
   → custom connector / remote MCP over HTTPS
   → ngrok public URL
-  → workspace-mcp   (bearer-authenticated, default-deny, read-only)
+  → workspace-mcp   (bearer-authenticated, default-deny, read-only unless a workspace opts into writes)
   → per-workspace os.Root sandbox (selected by the `workspace` param)
   → local directory tree(s) — git repos get extra operations
 ```
@@ -93,6 +95,29 @@ Requires Go 1.26+ (the `go.mod` toolchain); the `os.Root` sandbox itself needs 1
    ```
 
 `config.yaml` and `secrets.env` are gitignored. Only the `*.example.*` files are committed.
+
+### Enable writes (opt-in)
+
+Each workspace defaults to read-only. To allow editing a specific workspace,
+set `write.enabled: true` on it in `config.yaml`:
+
+```yaml
+workspaces:
+  - name: default
+    root: /absolute/path/to/repo
+    write:
+      enabled: true
+```
+
+This turns on three tools — `file_create`, `file_overwrite`, `file_replace`
+(string-match replace, à la `sed`) — gated by the **same** allow/deny policy as
+reads, with `expected_replacements` and `base_sha256` guards against
+mismatched or stale edits. There is no diff parser and no git automation: the
+server never commits, pushes, deletes, or renames — you review `git diff` and
+commit yourself. With `write.enabled: false` (the default) the three write
+tools are absent from `tools/list` entirely, and calling one anyway returns
+`READ_ONLY`. Full schemas and error codes are in
+[docs/design.md §5.3](docs/design.md).
 
 ## Run
 
@@ -234,11 +259,19 @@ without a reserved domain. With `server.zrok.enabled: true` the
 > one behind, and zrok's free tier caps concurrent environments — so leaked
 > environments eventually make share creation fail with an opaque `500`. When a
 > stable `uniqueName` is set, the server **self-heals**: on startup it reaps any
-> environment this same name left over (`env-<uniqueName>`) before enabling a new
-> one, so "last start wins" and a hard-killed predecessor cleans itself up next
-> run. The reserved name itself is never touched. (Environments leaked under a
-> *different* `uniqueName`, or before you set one, still need a one-time prune in
-> the zrok web console.)
+> environment this same name left over (`env-<uniqueName>`), first unsharing any
+> share still bound to it and then disabling the environment, before enabling a
+> new one — so "last start wins" and a hard-killed predecessor cleans itself up
+> next run. (The unshare step matters: zrok's own environment-disable path
+> soft-deletes the share but leaves its name reservation mapping behind, which
+> otherwise surfaces as `CreateShare` failing with a 409 `shareConflict` —
+> "already in use by another share" — even though nothing shows up in the zrok
+> web console.) The reserved name itself is never released by this self-heal;
+> only an explicit `zrok release`-equivalent call (`DeleteShareName`) frees it,
+> and that briefly opens the name up to any zrok account, so treat it as a
+> last-resort manual step and restart immediately after. (Environments leaked
+> under a *different* `uniqueName`, or before you set one, still need a
+> one-time prune in the zrok web console.)
 
 ## Add to claude.ai
 
@@ -277,30 +310,36 @@ Then start a chat and ask Claude to use the connector, e.g.:
 - "Grep the `docs` tree for `ASC workflow`."
 - "What's the git status of the `default` workspace?"
 
-## Tool surface (read-only)
+## Tool surface
 
-| Tool             | What it does                                                        |
-| ---------------- | ------------------------------------------------------------------- |
-| `workspace_info` | Orientation for *this* workspace (`{name, isGitRepo, description, wellKnownFiles, orientation, preview}`). No params. Mirrors the connect-time `instructions` (fallback for hosts that ignore them) and inlines a capped preview of the top orientation file. |
-| `file_read`      | Read one allowed file (`path`, optional `maxBytes`).               |
-| `tree_search`    | Find/browse files by `path` glob and/or `where` content predicates (frontmatter-aware); each result carries its `size`. |
-| `git_status`     | Branch + per-file status — git-repo workspaces only.              |
-| `git_diff`       | Working-tree diff as a unified diff (`path?`, `staged?`) — what changed inside the files `git_status` lists. Git-repo workspaces only. |
+| Tool               | What it does                                                        |
+| ------------------ | ------------------------------------------------------------------- |
+| `workspace_info`   | Orientation for *this* workspace (`{name, isGitRepo, description, wellKnownFiles, orientation, preview}`). No params. Mirrors the connect-time `instructions` (fallback for hosts that ignore them) and inlines a capped preview of the top orientation file. |
+| `file_read`        | Read one allowed file (`path`, optional `maxBytes`).               |
+| `tree_search`      | Find/browse files by `path` glob and/or `where` content predicates (frontmatter-aware); each result carries its `size`. |
+| `git_status`       | Branch + per-file status — git-repo workspaces only.              |
+| `git_diff`         | Working-tree diff as a unified diff (`path?`, `staged?`) — what changed inside the files `git_status` lists. Git-repo workspaces only. |
+| `file_create`      | *(opt-in, `write.enabled`)* Create a new file (`path`, `contents`); `PATH_EXISTS` if it's already there. |
+| `file_overwrite`   | *(opt-in)* Replace a file's full contents (`path`, `contents`, optional `base_sha256`, `dry_run`); must already exist. |
+| `file_replace`     | *(opt-in)* String-match replace within a file (`path`, `old_str`, `new_str`, optional `expected_replacements`, `base_sha256`, `dry_run`). |
 
 No tool takes a `workspace` argument: the workspace is fixed by the connector URL
 (`/mcp/<workspace>`). All paths are workspace-relative and resolved through that
-workspace's `os.Root`. Full input/output schemas and the error spec are in
-[docs/design.md §5](docs/design.md).
+workspace's `os.Root`. The three write tools only appear in `tools/list` (and
+only work) for a workspace with `write.enabled: true` — see
+[Enable writes](#enable-writes-opt-in). Full input/output schemas and the error
+spec are in [docs/design.md §5](docs/design.md).
 
 ## Safety model
 
 In short: hard **containment** (one symlink/TOCTOU-safe `os.Root` per workspace)
 plus a soft **policy** layer (per-workspace allow/deny globs + `.gitignore` +
-dotfile backstop, block always wins); read-only by construction; a constant-time
-bearer token (≥ 32 bytes, never logged; multiple accepted for rotation) with ngrok
-edge auth on top; and an audit
-log that records every call but never file contents or the token. The full
-reasoning is in [docs/design.md §2](docs/design.md).
+dotfile backstop, block always wins); **read-only by default**, with writes an
+explicit per-workspace opt-in gated by that same policy (§Enable writes); a
+constant-time bearer token (≥ 32 bytes, never logged; multiple accepted for
+rotation) with ngrok edge auth on top; and an audit log that records every call
+but never file contents or the token. The full reasoning is in
+[docs/design.md §2](docs/design.md).
 
 ## Shutdown
 

@@ -176,6 +176,17 @@ func reserveZrokName(root *zrokRoot, namespace, name string) (bool, error) {
 // instance can hold a given uniqueName at a time (the reserved name maps to a
 // single share), so a same-named environment is by definition stale — "last
 // start wins". Best-effort: failures here only warn, never block startup.
+//
+// Each stale environment's shares are explicitly unshared before the
+// environment is disabled. This matters because of a gap in zrok's controller:
+// disabling an environment (controller/disable.go) soft-deletes its shares
+// directly in the store, bypassing the unshare path that clears the share's
+// entry in share_name_mappings. A reserved uniqueName's mapping is left behind,
+// invisible in the zrok console (both the share and the environment are gone),
+// but still enough to make the next CreateShare on that name fail with 409
+// shareConflict ("already in use by another share"). Explicitly unsharing first
+// goes through the normal path and clears the mapping, so the name is free
+// again by the time we disable the environment.
 func reapStaleZrokEnvs(root *zrokRoot, description string, log *mcp.Logger) {
 	client, err := root.Client()
 	if err != nil {
@@ -192,6 +203,28 @@ func reapStaleZrokEnvs(root *zrokRoot, description string, log *mcp.Logger) {
 		if er.Environment == nil || er.Environment.Description != description || er.Environment.ZID == "" {
 			continue
 		}
+
+		// sdk.DeleteShare authenticates the unshare against root.Environment().
+		// ZitiIdentity, so it has to point at the *stale* environment while we
+		// unshare its leftover shares. reapStaleZrokEnvs runs before this root's
+		// own environment is enabled (root.env.ZitiIdentity is still unset at this
+		// point in serveZrok), so this is safe to set and clear here.
+		root.env.ZitiIdentity = er.Environment.ZID
+		for _, shr := range er.Shares {
+			if shr == nil || shr.ShareToken == "" {
+				continue
+			}
+			err := retryTransientZrok("reap: unshare stale share", 3, time.Second, log, func() error {
+				return sdk.DeleteShare(root, &sdk.Share{Token: shr.ShareToken})
+			})
+			if err != nil {
+				log.Slog().Warn("zrok reap: unshare stale share", "shareToken", shr.ShareToken, "zId", er.Environment.ZID, "err", err)
+				continue
+			}
+			log.Slog().Info("zrok reaped stale share", "shareToken", shr.ShareToken, "zId", er.Environment.ZID)
+		}
+		root.env.ZitiIdentity = ""
+
 		// The disable can transiently 500 if the controller is still tearing the
 		// environment down; retry briefly. Still best-effort — a final failure
 		// only warns, since the subsequent enable has its own (longer) retry and
