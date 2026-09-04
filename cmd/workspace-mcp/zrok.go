@@ -169,10 +169,11 @@ func reserveZrokName(root *zrokRoot, namespace, name string) (bool, error) {
 // previous run of this same uniqueName. Each start creates a fresh *ephemeral*
 // environment; an unclean exit (SIGKILL during a dev rebuild, or a failed
 // teardown) leaves it enabled on the account, and zrok's free tier caps
-// concurrent environments — once the cap is hit, the next CreateShare fails with
-// an opaque 500 from the controller's resource allocator. We make restarts
-// self-healing by reaping prior environments that carry our exact description
-// (env-<uniqueName>) before enabling a new one. This is safe because only one
+// concurrent environments — once the cap is hit, the controller's limit check
+// rejects the next enable outright (401 enableUnauthorized; the cap surfaces as
+// an auth failure, never a 5xx). We make restarts self-healing by reaping prior
+// environments that carry our exact description (env-<uniqueName>) before
+// enabling a new one. This is safe because only one
 // instance can hold a given uniqueName at a time (the reserved name maps to a
 // single share), so a same-named environment is by definition stale — "last
 // start wins". Best-effort: failures here only warn, never block startup.
