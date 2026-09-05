@@ -2,6 +2,7 @@ package test
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -200,6 +201,66 @@ func TestFileReplace(t *testing.T) {
 	if got := readDisk(t, rwDir, "doc.md"); got != "hello there\n" {
 		t.Fatalf("delete-text path wrong: on-disk %q", got)
 	}
+}
+
+// encoding: "base64" lets create/overwrite/replace carry bytes that aren't
+// valid UTF-8 text — a JSON string can't hold them any other way.
+func TestFileWriteBase64Encoding(t *testing.T) {
+	reg, rwDir, _ := writeRegistry(t)
+	f := newMCPFixture(t, reg)
+
+	raw := []byte{0xff, 0xfe, 0x00, 0x01, 'A', 'B', 0x00, 'Z'}
+	b64 := base64.StdEncoding.EncodeToString(raw)
+
+	// file_create decodes base64 into raw bytes on disk.
+	var created struct {
+		BytesWritten int    `json:"bytesWritten"`
+		SHA256       string `json:"sha256"`
+	}
+	f.callTool(t, "file_create", map[string]any{"path": "bin.md", "contents": b64, "encoding": "base64"}, &created)
+	if created.BytesWritten != len(raw) {
+		t.Fatalf("bytesWritten = %d, want %d", created.BytesWritten, len(raw))
+	}
+	sum := sha256.Sum256(raw)
+	wantHash := hex.EncodeToString(sum[:])
+	if created.SHA256 != wantHash {
+		t.Fatalf("sha256 = %s, want %s", created.SHA256, wantHash)
+	}
+	if got := readDisk(t, rwDir, "bin.md"); got != string(raw) {
+		t.Fatalf("on-disk bytes %x != %x", []byte(got), raw)
+	}
+
+	// file_overwrite decodes base64 too.
+	raw2 := append(append([]byte{}, raw...), 0x02, 0x03)
+	f.callTool(t, "file_overwrite", map[string]any{"path": "bin.md", "contents": base64.StdEncoding.EncodeToString(raw2), "encoding": "base64"}, nil)
+	if got := readDisk(t, rwDir, "bin.md"); got != string(raw2) {
+		t.Fatalf("on-disk bytes after overwrite %x != %x", []byte(got), raw2)
+	}
+
+	// file_replace matches and writes binary spans via the same encoding.
+	oldSpan := []byte{0x00, 0x01}
+	newSpan := []byte{0x09, 0x08}
+	var repl struct {
+		Replacements int `json:"replacements"`
+	}
+	f.callTool(t, "file_replace", map[string]any{
+		"path": "bin.md", "encoding": "base64",
+		"old_str": base64.StdEncoding.EncodeToString(oldSpan),
+		"new_str": base64.StdEncoding.EncodeToString(newSpan),
+	}, &repl)
+	if repl.Replacements != 1 {
+		t.Fatalf("want 1 replacement, got %d", repl.Replacements)
+	}
+	want := []byte{0xff, 0xfe, 0x09, 0x08, 'A', 'B', 0x00, 'Z', 0x02, 0x03}
+	if got := readDisk(t, rwDir, "bin.md"); got != string(want) {
+		t.Fatalf("on-disk bytes after replace %x != %x", []byte(got), want)
+	}
+
+	// Invalid base64 is rejected before touching the file.
+	assertToolError(t, f.callTool(t, "file_create", map[string]any{"path": "bad.md", "contents": "not-base64!!", "encoding": "base64"}, nil), "INVALID_ARGS")
+
+	// Unknown encoding value is rejected.
+	assertToolError(t, f.callTool(t, "file_create", map[string]any{"path": "bad2.md", "contents": "x", "encoding": "utf7"}, nil), "INVALID_ARGS")
 }
 
 // A file past the workspace read limit can't be edited in place (the whole file

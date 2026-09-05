@@ -9,6 +9,7 @@ package mcp
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -115,11 +116,34 @@ func checkBaseSHA(base string, current []byte) *toolError {
 	return nil
 }
 
+// decodeWriteContents interprets a write tool's `contents` (or file_replace's
+// `old_str`/`new_str`) per the caller-supplied `encoding`: "" (default) treats
+// it as "utf-8", taken verbatim as the JSON string's UTF-8 bytes (all JSON
+// strings are UTF-8, so this is not a choice among text encodings — it is
+// "don't decode"); "base64" decodes it into raw bytes first, the only way to
+// express bytes that aren't valid UTF-8 text through a JSON string. Mirrors
+// file_read's `encoding` output field.
+func decodeWriteContents(contents, encoding string) ([]byte, *toolError) {
+	switch encoding {
+	case "", "utf-8":
+		return []byte(contents), nil
+	case "base64":
+		b, err := base64.StdEncoding.DecodeString(contents)
+		if err != nil {
+			return nil, newToolError("INVALID_ARGS", "contents is not valid base64: "+err.Error())
+		}
+		return b, nil
+	default:
+		return nil, newToolError("INVALID_ARGS", `encoding must be "utf-8" or "base64"`)
+	}
+}
+
 // --- file_create ---
 
 type fileCreateArgs struct {
 	Path     string `json:"path"`
 	Contents string `json:"contents"`
+	Encoding string `json:"encoding"`
 }
 
 func (s *Server) fileCreate(args json.RawMessage) (any, ToolEvent, error) {
@@ -134,6 +158,11 @@ func (s *Server) fileCreate(args json.RawMessage) (any, ToolEvent, error) {
 	}
 	ev.Paths = []string{clean}
 
+	contents, te := decodeWriteContents(a.Contents, a.Encoding)
+	if te != nil {
+		return nil, ev, te
+	}
+
 	f, err := s.ws.Root.CreateNew(clean)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
@@ -142,11 +171,11 @@ func (s *Server) fileCreate(args json.RawMessage) (any, ToolEvent, error) {
 		return nil, ev, mapPathError(err)
 	}
 	defer f.Close()
-	n, err := f.Write([]byte(a.Contents))
+	n, err := f.Write(contents)
 	if err != nil {
 		return nil, ev, mapPathError(err)
 	}
-	hash := hashHex([]byte(a.Contents))
+	hash := hashHex(contents)
 	ev.Bytes, ev.Hash = n, hash
 	return fileWriteResult{Path: clean, BytesWritten: n, SHA256: hash}, ev, nil
 }
@@ -156,6 +185,7 @@ func (s *Server) fileCreate(args json.RawMessage) (any, ToolEvent, error) {
 type fileOverwriteArgs struct {
 	Path       string `json:"path"`
 	Contents   string `json:"contents"`
+	Encoding   string `json:"encoding"`
 	BaseSHA256 string `json:"base_sha256"`
 	DryRun     bool   `json:"dry_run"`
 }
@@ -171,6 +201,11 @@ func (s *Server) fileOverwrite(args json.RawMessage) (any, ToolEvent, error) {
 		return nil, ev, te
 	}
 	ev.Paths = []string{clean}
+
+	contents, te := decodeWriteContents(a.Contents, a.Encoding)
+	if te != nil {
+		return nil, ev, te
+	}
 
 	// Must already exist (no O_CREATE): a typo'd path is NOT_FOUND, not a new file.
 	info, err := s.ws.Root.Stat(clean)
@@ -191,10 +226,10 @@ func (s *Server) fileOverwrite(args json.RawMessage) (any, ToolEvent, error) {
 		}
 	}
 
-	hash := hashHex([]byte(a.Contents))
+	hash := hashHex(contents)
 	if a.DryRun {
 		ev.Hash = hash
-		return fileWriteResult{Path: clean, BytesWritten: len(a.Contents), SHA256: hash, DryRun: true}, ev, nil
+		return fileWriteResult{Path: clean, BytesWritten: len(contents), SHA256: hash, DryRun: true}, ev, nil
 	}
 
 	f, err := s.ws.Root.WriteExisting(clean)
@@ -202,7 +237,7 @@ func (s *Server) fileOverwrite(args json.RawMessage) (any, ToolEvent, error) {
 		return nil, ev, mapPathError(err)
 	}
 	defer f.Close()
-	n, err := f.Write([]byte(a.Contents))
+	n, err := f.Write(contents)
 	if err != nil {
 		return nil, ev, mapPathError(err)
 	}
@@ -216,6 +251,7 @@ type fileReplaceArgs struct {
 	Path                 string `json:"path"`
 	OldStr               string `json:"old_str"`
 	NewStr               string `json:"new_str"`
+	Encoding             string `json:"encoding"`
 	ExpectedReplacements *int   `json:"expected_replacements"`
 	BaseSHA256           string `json:"base_sha256"`
 	DryRun               bool   `json:"dry_run"`
@@ -227,8 +263,16 @@ func (s *Server) fileReplace(args json.RawMessage) (any, ToolEvent, error) {
 	if err := unmarshalArgs(args, &a); err != nil {
 		return nil, ev, err
 	}
-	if a.OldStr == "" {
+	oldStr, te := decodeWriteContents(a.OldStr, a.Encoding)
+	if te != nil {
+		return nil, ev, te
+	}
+	if len(oldStr) == 0 {
 		return nil, ev, newToolError("INVALID_ARGS", "old_str must be non-empty")
+	}
+	newStr, te := decodeWriteContents(a.NewStr, a.Encoding)
+	if te != nil {
+		return nil, ev, te
 	}
 	expected := 1
 	if a.ExpectedReplacements != nil {
@@ -251,8 +295,7 @@ func (s *Server) fileReplace(args json.RawMessage) (any, ToolEvent, error) {
 		return nil, ev, te
 	}
 
-	old := []byte(a.OldStr)
-	count := bytes.Count(cur, old)
+	count := bytes.Count(cur, oldStr)
 	if count != expected {
 		return nil, ev, &toolError{
 			Code:    "MATCH_COUNT_MISMATCH",
@@ -260,7 +303,7 @@ func (s *Server) fileReplace(args json.RawMessage) (any, ToolEvent, error) {
 			Reason:  "match_count_mismatch",
 		}
 	}
-	next := bytes.ReplaceAll(cur, old, []byte(a.NewStr))
+	next := bytes.ReplaceAll(cur, oldStr, newStr)
 	hash := hashHex(next)
 	if a.DryRun {
 		ev.Hash = hash

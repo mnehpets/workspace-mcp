@@ -154,10 +154,12 @@ func (s *Server) writeToolDefs() []Tool {
 			Description: "Create a NEW file in this workspace with the given contents. " +
 				"Fails with PATH_EXISTS if the path already exists — use file_overwrite to replace an existing file. " +
 				"Missing parent directories are created automatically. Writes raw bytes with no normalization (no trailing-newline or line-ending rewrite), so include exactly the bytes you want. " +
+				"To write a binary file, set `encoding` to \"base64\" and pass `contents` base64-encoded — the same encoding file_read uses when it hands you a binary file's bytes. " +
 				"Returns the resulting `sha256` (pass it as a later edit's `base_sha256`).",
 			InputSchema: schema(map[string]any{
 				"path":     map[string]any{"type": "string", "description": "Workspace-relative path of the file to create."},
-				"contents": map[string]any{"type": "string", "description": "Full contents of the new file, written verbatim."},
+				"contents": map[string]any{"type": "string", "description": "Full contents of the new file, written verbatim (per `encoding`)."},
+				"encoding": map[string]any{"type": "string", "enum": []string{"utf-8", "base64"}, "description": "How to interpret `contents` (default \"utf-8\", written verbatim as its UTF-8 bytes). Set \"base64\" to write raw binary data — decode failures return INVALID_ARGS."},
 			}, "path", "contents"),
 			Annotations: writeAnnotations("Create file", false),
 		},
@@ -167,10 +169,12 @@ func (s *Server) writeToolDefs() []Tool {
 				"Use it when a file changes so substantially that quoting an `old_str` would be pointless; for a localized edit prefer file_replace. " +
 				"Fails with NOT_FOUND if the path does not exist (use file_create), so a typo can't silently create a stray file. " +
 				"Pass `base_sha256` (the file's current hash, e.g. the `sha256` returned by file_read) to reject the write if the file changed since you read it (BASE_SHA_MISMATCH). " +
-				"Pass `dry_run: true` to preview the resulting hash without writing. Writes raw bytes with no normalization.",
+				"Pass `dry_run: true` to preview the resulting hash without writing. Writes raw bytes with no normalization. " +
+				"To overwrite with binary data, set `encoding` to \"base64\" as in file_create.",
 			InputSchema: schema(map[string]any{
 				"path":        map[string]any{"type": "string", "description": "Workspace-relative path of the existing file to overwrite."},
-				"contents":    map[string]any{"type": "string", "description": "Full new contents, written verbatim."},
+				"contents":    map[string]any{"type": "string", "description": "Full new contents, written verbatim (per `encoding`)."},
+				"encoding":    map[string]any{"type": "string", "enum": []string{"utf-8", "base64"}, "description": "How to interpret `contents` (default \"utf-8\"). Set \"base64\" to write raw binary data — decode failures return INVALID_ARGS."},
 				"base_sha256": map[string]any{"type": "string", "description": "Optional optimistic-concurrency guard: the file's expected current hex SHA-256. The write is rejected with BASE_SHA_MISMATCH (returning the actual hash) if it differs."},
 				"dry_run":     map[string]any{"type": "boolean", "description": "If true, validate and return the would-be result hash without writing (default false)."},
 			}, "path", "contents"),
@@ -182,12 +186,14 @@ func (s *Server) writeToolDefs() []Tool {
 				"Matches raw bytes exactly — no whitespace or line-ending normalization — so quote `old_str` precisely, including indentation. " +
 				"By default exactly ONE occurrence must match; the call is rejected with MATCH_COUNT_MISMATCH (echoing the actual count) otherwise, which guarantees you edited the span you meant. " +
 				"Set `expected_replacements` to change all N matches deliberately. Empty `old_str` is rejected. " +
+				"To patch bytes inside a binary file — or match/insert byte sequences that aren't valid UTF-8 text — set `encoding` to \"base64\"; it applies to both `old_str` and `new_str`. " +
 				"Optional `base_sha256` (reject on drift) and `dry_run` (preview the match count and resulting hash without writing) behave as in file_overwrite. " +
 				"Files larger than the workspace read limit are rejected with FILE_TOO_LARGE.",
 			InputSchema: schema(map[string]any{
 				"path":                  map[string]any{"type": "string", "description": "Workspace-relative path of the existing file to edit."},
-				"old_str":               map[string]any{"type": "string", "description": "Exact substring to find (matched against raw bytes, verbatim). Must be non-empty."},
-				"new_str":               map[string]any{"type": "string", "description": "Replacement substring (may be empty to delete the matched text)."},
+				"old_str":               map[string]any{"type": "string", "description": "Exact substring to find (matched against raw bytes, verbatim, per `encoding`). Must be non-empty."},
+				"new_str":               map[string]any{"type": "string", "description": "Replacement substring (per `encoding`; may be empty to delete the matched text)."},
+				"encoding":              map[string]any{"type": "string", "enum": []string{"utf-8", "base64"}, "description": "How to interpret both `old_str` and `new_str` (default \"utf-8\"). Set \"base64\" to match/write raw binary data — decode failures return INVALID_ARGS."},
 				"expected_replacements": map[string]any{"type": "integer", "description": "Number of occurrences that must match (default 1). The edit is rejected unless the actual count equals this exactly."},
 				"base_sha256":           map[string]any{"type": "string", "description": "Optional optimistic-concurrency guard: the file's expected current hex SHA-256 (BASE_SHA_MISMATCH on drift)."},
 				"dry_run":               map[string]any{"type": "boolean", "description": "If true, return the match count and resulting hash without writing (default false)."},
