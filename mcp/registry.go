@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/mnehpets/workspace-mcp/gitaware"
-	"github.com/mnehpets/workspace-mcp/grrep"
 )
 
 // ErrUnknownWorkspace is returned when a requested workspace name is not configured.
@@ -20,8 +19,6 @@ var ErrUnknownWorkspace = errors.New("unknown workspace")
 type Workspace struct {
 	Name                 string
 	Root                 *Root
-	Policy               *Policy
-	Ignore               *grrep.IgnoreSet // nil when respectGitignore is disabled
 	IsGitRepo            bool
 	Read                 ReadConfig
 	Grep                 GrepConfig
@@ -43,29 +40,29 @@ func Build(cfg *Config) (*Registry, error) {
 	reg := &Registry{byName: make(map[string]*Workspace, len(cfg.Workspaces))}
 	for i := range cfg.Workspaces {
 		wc := cfg.Workspaces[i]
-		root, err := Open(wc.Root)
+		var popts []PolicyOption
+		if wc.Write.Enabled {
+			popts = append(popts, WithWrites())
+		}
+		if wc.RespectGitignore {
+			popts = append(popts, WithGitignore())
+		}
+		root, err := Open(wc.Root, WithPolicy(NewPolicy(wc.Policy.AllowGlobs, wc.Policy.BlockGlobs, popts...)))
 		if err != nil {
 			reg.Close()
 			return nil, fmt.Errorf("workspace %q: open root: %w", wc.Name, err)
 		}
-		var ig *grrep.IgnoreSet
-		if wc.RespectGitignore {
-			ig = grrep.NewIgnoreSet(wc.Root)
-		}
-		pol := NewPolicy(wc.Policy.AllowGlobs, wc.Policy.BlockGlobs)
 		ws := &Workspace{
 			Name:      wc.Name,
 			Root:      root,
-			Policy:    pol,
-			Ignore:    ig,
 			IsGitRepo: gitaware.Detect(wc.Root),
 			Read:      wc.Read,
 			Grep:      wc.Grep,
 			Write:     wc.Write,
 		}
 		// Orientation metadata, computed once at startup. Both ride the workspace's
-		// os.Root + policy: a blocked/missing file simply contributes nothing.
-		ws.WellKnownFiles = detectOrientation(root, pol)
+		// Root, which applies its rules: a blocked/missing file contributes nothing.
+		ws.WellKnownFiles = detectOrientation(root)
 		if wc.Description != "" {
 			ws.Description = wc.Description // config is authoritative; never refreshed
 			ws.HasConfigDescription = true
@@ -98,9 +95,10 @@ const maxWellKnownFiles = 5
 // detectOrientation scans the tree root once and returns the orientation files
 // present, priority-ordered (then alphabetical), capped at maxWellKnownFiles.
 // A candidate must be a regular file (symlinks/dirs skipped) whose lowercased,
-// extension-stripped name is a known stem and that clears policy. Presence only
+// extension-stripped name is a known stem; Root.ReadDir already leaves out
+// entries the workspace's rules do not list. Presence only
 // — it never reads content.
-func detectOrientation(root *Root, pol *Policy) []string {
+func detectOrientation(root *Root) []string {
 	rank := make(map[string]int, len(orientationStems))
 	for i, s := range orientationStems {
 		rank[s] = i
@@ -122,9 +120,6 @@ func detectOrientation(root *Root, pol *Policy) []string {
 		stem := strings.ToLower(strings.TrimSuffix(name, path.Ext(name)))
 		r, ok := rank[stem]
 		if !ok {
-			continue
-		}
-		if !pol.CheckFile(name).Allowed {
 			continue
 		}
 		hits = append(hits, hit{name, r})

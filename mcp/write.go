@@ -35,24 +35,6 @@ type fileReplaceResult struct {
 	DryRun       bool   `json:"dryRun,omitempty"`
 }
 
-// writeGate is the shared front door for every write op: it enforces the opt-in
-// flag, then validates and policy-checks the target exactly as a read would. A
-// disabled workspace returns READ_ONLY; an out-of-policy or unsafe path returns
-// POLICY_DENIED. The returned path is the cleaned workspace-relative form.
-func (s *Server) writeGate(p string) (string, *toolError) {
-	if !s.ws.Write.Enabled {
-		return "", &toolError{Code: "READ_ONLY", Message: "writes are disabled for this workspace", Reason: "write_disabled"}
-	}
-	clean, err := Clean(p)
-	if err != nil {
-		return "", mapPathError(err)
-	}
-	if d := s.ws.Policy.CheckFile(clean); !d.Allowed {
-		return "", mapPolicyDenied(d.Reason)
-	}
-	return clean, nil
-}
-
 // hashHex is the hex SHA-256 used everywhere a content hash is named (base_sha256,
 // the sha256 result field, file_read's sha256, the audit trail).
 func hashHex(b []byte) string {
@@ -152,9 +134,9 @@ func (s *Server) fileCreate(args json.RawMessage) (any, ToolEvent, error) {
 	if err := unmarshalArgs(args, &a); err != nil {
 		return nil, ev, err
 	}
-	clean, te := s.writeGate(a.Path)
-	if te != nil {
-		return nil, ev, te
+	clean, err := Clean(a.Path)
+	if err != nil {
+		return nil, ev, mapPathError(err)
 	}
 	ev.Paths = []string{clean}
 
@@ -196,9 +178,9 @@ func (s *Server) fileOverwrite(args json.RawMessage) (any, ToolEvent, error) {
 	if err := unmarshalArgs(args, &a); err != nil {
 		return nil, ev, err
 	}
-	clean, te := s.writeGate(a.Path)
-	if te != nil {
-		return nil, ev, te
+	clean, err := Clean(a.Path)
+	if err != nil {
+		return nil, ev, mapPathError(err)
 	}
 	ev.Paths = []string{clean}
 
@@ -281,9 +263,9 @@ func (s *Server) fileReplace(args json.RawMessage) (any, ToolEvent, error) {
 	if expected < 1 {
 		return nil, ev, newToolError("INVALID_ARGS", "expected_replacements must be >= 1")
 	}
-	clean, te := s.writeGate(a.Path)
-	if te != nil {
-		return nil, ev, te
+	clean, err := Clean(a.Path)
+	if err != nil {
+		return nil, ev, mapPathError(err)
 	}
 	ev.Paths = []string{clean}
 

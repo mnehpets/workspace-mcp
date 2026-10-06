@@ -138,7 +138,7 @@ func (s *Server) toolDefs() []Tool {
 			Annotations: readOnlyAnnotations("Git diff"),
 		},
 	}
-	if s.ws.Write.Enabled {
+	if s.ws.Root.Writable() {
 		tools = append(tools, s.writeToolDefs()...)
 	}
 	return tools
@@ -146,7 +146,7 @@ func (s *Server) toolDefs() []Tool {
 
 // writeToolDefs returns the opt-in write tools (§8.7). They are only included in
 // tools/list when the workspace sets write.enabled; a write-disabled workspace
-// never advertises them (and a forced call returns READ_ONLY via writeGate).
+// never advertises them (and a forced call returns READ_ONLY from Root).
 func (s *Server) writeToolDefs() []Tool {
 	return []Tool{
 		{
@@ -227,7 +227,7 @@ func (s *Server) workspaceInfo(_ json.RawMessage) (any, ToolEvent, error) {
 	w := s.ws
 
 	// Scan fresh: reflect any files created/deleted since startup.
-	freshFiles := detectOrientation(w.Root, w.Policy)
+	freshFiles := detectOrientation(w.Root)
 
 	// Description: config-supplied is authoritative and never refreshed;
 	// README-derived is re-derived from the fresh file list.
@@ -240,7 +240,7 @@ func (s *Server) workspaceInfo(_ json.RawMessage) (any, ToolEvent, error) {
 		Description:    desc,
 		WellKnownFiles: strings.Join(freshFiles, ", "),
 		IsGitRepo:      w.IsGitRepo,
-		Writable:       w.Write.Enabled,
+		Writable:       w.Root.Writable(),
 	})
 
 	out := map[string]any{
@@ -372,10 +372,8 @@ func (s *Server) fileRead(args json.RawMessage) (any, ToolEvent, error) {
 		return nil, ev, mapPathError(err)
 	}
 	ev.Paths = []string{clean}
-	if d := ws.Policy.CheckFile(clean); !d.Allowed {
-		return nil, ev, mapPolicyDenied(d.Reason)
-	}
 
+	// Stat enforces the access rules (denied wins over not-found).
 	info, err := ws.Root.Stat(clean)
 	if err != nil {
 		return nil, ev, mapPathError(err)
@@ -597,7 +595,7 @@ func (s *Server) treeSearch(args json.RawMessage) (any, ToolEvent, error) {
 	if a.Path != "" {
 		ev.Paths = []string{a.Path}
 	}
-	res, err := Search(ws.Root, ws.Policy, ws.Ignore, SearchRequest{
+	res, err := Search(ws.Root, SearchRequest{
 		PathGlob:        a.Path,
 		Where:           preds,
 		IncludeMatches:  includeMatches,
@@ -714,7 +712,7 @@ func (s *Server) gitDiff(args json.RawMessage) (any, ToolEvent, error) {
 			return nil, ev, mapPathError(err)
 		}
 		// Denied wins over existence, so a blocked path never leaks its presence.
-		if d := ws.Policy.CheckFile(clean); !d.Allowed {
+		if d := ws.Root.Check(clean, false); !d.Allowed {
 			return nil, ev, mapPolicyDenied(d.Reason)
 		}
 		scope = clean
@@ -725,7 +723,7 @@ func (s *Server) gitDiff(args json.RawMessage) (any, ToolEvent, error) {
 	// Per-file gate: policy (a denied file is silently excluded from an unscoped
 	// diff so a dirty .env can never leak) AND, when scoped, the path scope.
 	filter := func(rel string) bool {
-		if !ws.Policy.CheckFile(rel).Allowed {
+		if !ws.Root.Check(rel, false).Allowed {
 			return false
 		}
 		return scopeMatches(scope, rel)

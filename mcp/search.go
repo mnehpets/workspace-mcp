@@ -100,7 +100,7 @@ type SearchResult struct {
 // inside a frontmatter fence are split out from body matches. The result list is
 // path-sorted and capped at maxMatches (counting matched lines, or one per file
 // when there are no matches), with Truncated set when the cap drops a file.
-func Search(root *Root, pol *Policy, ig *grrep.IgnoreSet, req SearchRequest, workers, maxMatches int, readCap int64) (*SearchResult, error) {
+func Search(root *Root, req SearchRequest, workers, maxMatches int, readCap int64) (*SearchResult, error) {
 	matchers := make([]*grrep.Matcher, len(req.Where))
 	for i, p := range req.Where {
 		m, err := grrep.CompileMatcher(p.Text, grrep.MatchOpts{
@@ -139,7 +139,7 @@ func Search(root *Root, pol *Policy, ig *grrep.IgnoreSet, req SearchRequest, wor
 		readCap = defaultReadCap
 	}
 
-	files, err := collectFiles(root, pol, ig, walkStart)
+	files, err := collectFiles(root, walkStart)
 	if err != nil {
 		return nil, err
 	}

@@ -55,54 +55,140 @@ ops — see §5.3; it is never the default posture and never a diff/patch engine
 
 ---
 
-## 2. Security model — the core decision
+## 2. Security model
 
 Security is the reason the project is shaped the way it is, so it comes before the
 feature surface.
 
-### 2.1 Two distinct layers: containment vs. policy
+Every path the model asks about goes through three checks, always in the same
+order: a path check that keeps it inside the workspace (§2.1), an access check
+that decides whether its content may be served (§2.2), and a visibility check that
+decides whether it shows up in listings and search results (§2.3). All three live
+in one place, the workspace's `Root`, so no tool has to remember to apply them.
 
-| Layer | Mechanism | Guarantee |
-|---|---|---|
-| **Containment (hard)** | one `os.Root` per workspace (`os.OpenRoot`, Go 1.24+) | Every filesystem op stays inside the root **even through symlinks**, and resists TOCTOU races. A symlink to `/etc/passwd` cannot be followed out. This is *the wall.* |
-| **Policy (soft)** | per-workspace allow/deny globs + `.gitignore` + dotfile rules | Refuses things that are *inside* the sandbox but shouldn't be served (`.git/**`, `.env`, keys, `node_modules`). `blockGlobs` always wins. Sits *on top* of containment, not as the boundary. |
+### 2.1 Staying inside the workspace
 
-A path must clear **both** layers to be served. Model-supplied absolute paths and
-any `..` are rejected *before* resolution ([fsroot.Clean], surfaced as
-`POLICY_DENIED`/`absolute_path`|`traversal` in [mcp/server.go:215]); everything
-else resolves through that workspace's `*os.Root`. We never hand-roll traversal
-checks as the boundary — that is precisely what `os.Root` is for.
+Each workspace has one `os.Root` (`os.OpenRoot`, Go 1.24+). Every file operation
+goes through it, and it keeps the operation inside the workspace directory even
+when symlinks are involved, including when a symlink is swapped in mid-operation.
+A symlink pointing at `/etc/passwd` cannot be followed out. This is the hard
+boundary, and nothing else in the design substitutes for it.
 
-### 2.2 Where `os.Root` is load-bearing — and where it isn't
+Before a path reaches `os.Root`, absolute paths and any `..` are rejected
+(`Clean`, reported as `POLICY_DENIED` with reason `absolute_path` or `traversal`
+in [mcp/server.go:215]). We do not write our own path-traversal checks to act as
+the boundary. That is what `os.Root` is for.
 
-`os.Root` is essential for **model-supplied paths** (`file_read` and the write ops
-`file_create`/`file_overwrite`/`file_replace`): the path comes straight from the
-model and may be hostile. The write ops resolve through the *same* `os.Root` and
-clear the *same* `policy.CheckFile` a read does (block wins), so a write can never
-escape containment or reach a blocked path — the writable surface is exactly the
-readable one.
+### 2.2 Access: what content can be served
 
-Two classes of helper deliberately read **outside** `os.Root`, which is safe
-because they never serve file *content* to the model — they produce metadata only:
+Access rules are the per-workspace `allowGlobs` and `blockGlobs`, plus a default
+rule about hidden files. They answer one question: may the server hand the
+content of this path to the model? The same answer applies to reads, grep
+matches, find results and writes, so a write can never reach a path a read could
+not.
 
-- **go-git** (status, tracked-file enumeration) reads via its own `go-billy`/`osfs`.
-- **grrep's `IgnoreSet`** reads `.gitignore`/`.ignore` while walking.
+For a file, the rules are applied in this order, and the first one that matches
+decides:
 
-The trust split: these decide *what exists / what's ignored / what changed*;
-`os.Root` decides *what content crosses the boundary*. The grep walker is the one
-nuance — it reads content, but over a tree we control (`fastwalk` skips
-non-regular files so symlinks are never followed, and skips `.git`), and it still
-opens each matched leaf through `os.Root`. Rule of thumb: **anything reading
-content the model can aim goes through `os.Root`; pure-metadata helpers may walk
-freely.**
+1. If it matches a `blockGlobs` pattern, it is denied (`blocked_glob`). Block
+   always wins, even over an allow pattern.
+2. If any part of its path starts with a dot (`.env`, `.github/ci.yml`) and no
+   `allowGlobs` pattern matches it, it is denied (`dotfile`). A matching allow
+   pattern is how you opt in to a hidden file. Note that `**/*` matches dotfiles
+   too, so using it as an allow glob opts in to all of them (except `.git`, which
+   is blocked separately).
+3. If `allowGlobs` is non-empty and nothing in it matches, it is denied
+   (`not_allowlisted`). With an empty allow list, everything not denied above is
+   allowed.
+4. Otherwise it is allowed.
 
-### 2.3 Read-only by construction, and auth
+For a directory, rules 1 and 2 apply but rule 3 does not. If the allow list
+applied to directories, nothing could be browsed to reach the allowed files
+inside. The workspace root is always listable.
+
+`.git` is added to every workspace's block list automatically, so the git
+directory needs no special handling anywhere else in the code.
+
+### 2.3 Visibility: what shows up in listings and search
+
+Visibility rules are `.gitignore` and `.ignore` files, when the workspace has
+`respectGitignore` on. They answer a different question: is this path worth
+showing? They exist to keep build output, caches and `node_modules` out of
+results, not to protect anything.
+
+The relationship between the two is deliberately one-way:
+
+- A path is **listed** (shown in directory listings, `tree_search` and grep) only
+  if it is allowed by §2.2 **and** not ignored.
+- A path that is ignored is hidden from listings but can still be read by name,
+  provided §2.2 allows it.
+- Ignore files can never grant access, and can never deny it. Only §2.2 does
+  that.
+
+| | Denied by access rules | Allowed, but gitignored | Allowed, not ignored |
+|---|---|---|---|
+| Read by name (`file_read`) | refused | works | works |
+| Write (if enabled) | refused | works | works |
+| Directory listing, find, grep | hidden | hidden | shown |
+
+This keeps ignore files from acting as security policy. Anyone who can edit a
+`.gitignore` in the repo can change what is listed, but not what is served, so
+editing it cannot expose a blocked file. It also means the interaction between
+the two mechanisms is a single sentence: ignore files can hide things from
+listings, and nothing else.
+
+One consequence worth knowing: because dotfiles are an access rule, not a
+visibility rule, the walker has no dotfile skipping of its own. An `allowGlobs`
+entry such as `.github/**` makes those files readable *and* listed.
+
+### 2.4 One place enforces all of it
+
+`Root` is opened with the workspace's `Policy` (`WithPolicy`), which holds all of
+its rules: the allow/block globs, whether writes are permitted (`WithWrites()`,
+from `write.enabled`) and whether ignore files hide paths from listings
+(`WithGitignore()`, from `respectGitignore`). It answers the two questions in two
+places:
+
+- `Check(rel, isDir)` answers "may this be served?" (§2.2). `Open`, `Stat`,
+  `Lstat`, `CreateNew` and `WriteExisting` all call it and return a
+  `DeniedError` carrying the reason, which the tools turn into `POLICY_DENIED`.
+  A denied path is reported as denied whether or not it exists.
+- Whether writes are allowed at all is part of the same policy (`WithWrites()`,
+  set from `write.enabled`). Unless it is set, `CreateNew` and `WriteExisting`
+  return `ErrReadOnly`, which the tools report as `READ_ONLY`.
+- `Lister().Listed(rel, isDir)` answers "should this show up?" (§2.3). It is
+  true only if `Check` allows the path and neither the path nor any parent
+  directory is gitignored. `ReadDir`, `WalkDir` and the parallel walker behind
+  `tree_search` use it and have no filtering rules of their own. A `Lister`
+  reads the ignore files when it is created, so create one per listing; it is
+  safe to use from several goroutines.
+
+### 2.5 Which code reads outside `os.Root`
+
+Two kinds of helper read the filesystem without going through `os.Root`. That is
+acceptable because they only produce information about files (what exists, what
+is ignored, what changed) and never hand file content to the model:
+
+- **go-git** (status, tracked-file enumeration) reads through its own
+  `go-billy`/`osfs` layer.
+- **grrep's `IgnoreSet`** reads `.gitignore` and `.ignore` files while walking.
+
+The grep walker is the one case that needs care, because it does read content. It
+only walks a tree we control (`fastwalk` skips anything that is not a regular
+file, so symlinks are never followed), and it opens each match through
+`os.Root`.
+
+The rule: **any code that reads file content the model can point at goes through
+`os.Root`. Code that only gathers information about files may walk the tree
+directly.**
+
+### 2.6 Read-only by construction, and auth
 
 - **Read-only is the default posture.** A workspace writes only when its config
   sets `write.enabled: true` (§5.3); with it off the three write tools are absent
-  from `tools/list` and any forced call returns `READ_ONLY`, so the `*os.Root` is
-  used only for read methods. Where writes are granted they still ride that
-  workspace's `*os.Root` + `policy.CheckFile`, so read-only remains the default
+  from `tools/list`, and `Root` itself refuses any write, so a forced call returns
+  `READ_ONLY`. Where writes are granted they still ride that workspace's
+  `*os.Root` and the same access check (§2.2), so read-only remains the default
   build posture, not just a config value.
 - **Auth is layered:** a server-wide bearer token (constant-time compared, ≥ 32
   bytes, sourced from `secrets.env`/OS env — never from `config.yaml`), and/or an
@@ -136,18 +222,18 @@ freely.**
     the operator — and a remote caller can never insert into the code map. The code
     is single-use (cleared on first correct entry), constant-time compared, and
     rotates only when consumed or after 1 minute, so page reloads within the window
-    neither reprint nor rotate it. Belt-and-suspenders, the code map is also swept
+    neither reprint nor rotate it. As an extra safeguard, the code map is also swept
     of expired entries on insert and hard-capped ([mcp/oauth.go] `oauthMaxCodes`);
     with inserts already gated by the console code the cap only ever trips under
     anomalous local use, so it bounds memory without creating a remote lockout. The
     `client_id` is likewise constant-time compared. This gate does **not** defend
-    against the in-path tunnel operator (§2.4), who harvests the already-minted
+    against the in-path tunnel operator (§2.7), who harvests the already-minted
     access token off the wire without ever touching `/oauth/authorize`.
 - **Audit log:** every call records method, tool, workspace, resolved path(s),
   allow/deny + reason, and byte/match counts — never file contents, never the
   token ([mcp/server.go:154] `ToolsCall` → `s.log.ToolCall(ev)`).
 
-### 2.4 The trust boundary ends at the tunnel frontend
+### 2.7 The trust boundary ends at the tunnel frontend
 
 The bearer/OAuth layer and the `os.Root` boundary protect against unauthorized
 callers and path escape, but they say nothing about the *channel* once a
@@ -161,7 +247,7 @@ attacker-chosen file contents, or alter a write tool's arguments). This is
 inherent to *any* remote proxy whose cert you don't control; it is not specific
 to zrok.
 
-- **Name takeover — the sharper, zrok-specific variant.** claude.ai persists the
+- **Name takeover (specific to zrok).** claude.ai persists the
   connector as `<uniqueName>` + the bearer token and **replays that token on
   every request**, so whoever answers at that name receives the credential. If
   the namespace name were first-come / ephemeral, an attacker could claim it
@@ -176,11 +262,11 @@ to zrok.
 - **The only real fix is a frontend whose cert we control** — a reverse proxy on
   our own domain, terminating TLS on hardware we run, rather than a shared
   third-party edge. Until then the tunnel operator must be treated as in-path:
-  keep bearer tokens rotatable (§2.3) so a leak is recoverable, bound the token's
-  blast radius, and prefer the no-tunnel deployment (`127.0.0.1:PORT` behind a
-  self-hosted reverse proxy, §6) whenever the workspace contents or the write
-  surface are sensitive. The built-in tunnels optimize for reach and convenience,
-  not for confidentiality against the operator.
+  keep bearer tokens rotatable (§2.6) so a leak is recoverable, limit what a
+  leaked token can do, and prefer the no-tunnel deployment (`127.0.0.1:PORT`
+  behind a self-hosted reverse proxy, §6) whenever the workspace contents or the write
+  surface are sensitive. The built-in tunnels are built for reach and convenience,
+  not for keeping content private from the operator.
 
 ---
 
@@ -190,7 +276,7 @@ All application logic lives in `mcp/` — config, secrets, auth, registry, sandb
 policy, search, logging, and the protocol surface are all one package, avoiding the
 nesting overhead of `internal/` subdirectories for what is a single-binary app.
 `grrep/` (vendored) and `gitaware/` remain separate because they have distinct
-ownership and trust properties (see §2.2). Dependency arrows point one way: the
+ownership and trust properties (see §2.5). Dependency arrows point one way: the
 `mcp` package orchestrates; `grrep` and `gitaware` know nothing about MCP.
 
 ```
@@ -236,8 +322,8 @@ mcp/                 Everything except the vendored search core and git layer.
   search.go          tree_search engine: path-glob boundary + AND-combined where
                      predicates + frontmatter-fence splitting. Drives walk.go.
   write.go           The opt-in write surface: file_create/file_overwrite/
-                     file_replace. Shared writeGate (write.enabled → Clean →
-                     policy.CheckFile), base_sha256 optimistic-concurrency check,
+                     file_replace. Each write op: Clean, then Root (which
+                     applies the write flag and access rules), base_sha256 optimistic-concurrency check,
                      exact-byte match/replace. No diff parser, no git automation.
   log.go             Redacting slog logger. ToolEvent carries the per-call record;
                      never logs content or the token.
@@ -311,7 +397,7 @@ var is a startup error. A plain-string literal is *allowed but discouraged* for
 
 For **rotation**, `auth` accepts a list `bearerTokens: [ {env: A}, {env: B} ]` in
 place of the single `bearerToken` (set one or the other, not both); each resolves
-the same way and each must be ≥ 32 bytes. See §2.3.
+the same way and each must be ≥ 32 bytes. See §2.6.
 
 ### 4.2 Shape
 
@@ -566,9 +652,10 @@ them. Rationale recorded in [PLAN-git-diff.md] §0.1.
 Three explicit byte-level ops mirroring the Claude Code edit tools — **not** a diff
 parser, no git automation. Present in `tools/list` (and the `instructions` prose
 flips to mention editing) **only** when the workspace sets `write.enabled: true`;
-otherwise they are absent and any forced call returns `READ_ONLY`. Each runs the
-shared `writeGate` (`write.enabled` → `Clean` → `policy.CheckFile`), so a write
-target clears the *same* allow/block a read does, through the same `os.Root`. Every
+otherwise they are absent and any forced call returns `READ_ONLY`. Each op
+cleans the path and then writes through `Root`, which refuses the write unless the
+workspace permits writes and the target clears the *same* allow/block a read does,
+through the same `os.Root`. Every
 op writes **raw bytes with zero normalization** (no whitespace trim, no line-ending
 rewrite) — silent normalization would turn a safe rejection into a wrong-place
 edit. The human reviews `git diff` and commits out of band; the server never
@@ -607,7 +694,7 @@ optimistic-concurrency guard against the read-then-write race (the tree syncs fr
 GitHub out of band); on mismatch → `BASE_SHA_MISMATCH` returning the actual hash.
 `dry_run` on overwrite/replace returns the count + resulting hash without writing,
 so the model can confirm an `old_str` resolved uniquely before committing. Each
-change audits a content hash (§2.3).
+change audits a content hash (§2.6).
 
 **Hard exclusions** — never in `tools/list`, always rejected in `tools/call`: any
 file delete/move/rename, any shell/command execution, any Git mutation. The three
@@ -733,7 +820,7 @@ treat a partial result as complete.
 
   Both built-in tunnels terminate TLS at the operator's edge, so the operator is
   in-path on the cleartext stream; the persistent zrok name reservation also
-  guards against credential theft via name takeover. See §2.4 — a self-hosted
+  guards against credential theft via name takeover. See §2.7 — a self-hosted
   reverse proxy whose cert we control is the only deployment that closes that gap.
 
   Either way claude.ai reaches the server as a custom connector / remote MCP,

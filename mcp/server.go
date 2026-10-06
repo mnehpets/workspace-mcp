@@ -120,7 +120,7 @@ func workspaceInstructions(ws *Workspace) string {
 		Description:    ws.Description,
 		WellKnownFiles: strings.Join(ws.WellKnownFiles, ", "),
 		IsGitRepo:      ws.IsGitRepo,
-		Writable:       ws.Write.Enabled,
+		Writable:       ws.Root.Writable(),
 	})
 }
 
@@ -255,7 +255,7 @@ var toolHandlers = map[string]toolFunc{
 	"git_status":     (*Server).gitStatus,
 	"git_diff":       (*Server).gitDiff,
 	// Write surface (§8.7). Always registered so a forced call on a write-disabled
-	// workspace returns READ_ONLY (via writeGate) rather than "unknown tool"; they
+	// workspace returns READ_ONLY (via Root) rather than "unknown tool"; they
 	// only appear in tools/list when write.enabled (see toolDefs).
 	"file_create":    (*Server).fileCreate,
 	"file_overwrite": (*Server).fileOverwrite,
@@ -288,7 +288,12 @@ func asToolError(err error) *toolError {
 // mapPathError converts fsroot/os path errors into a POLICY_DENIED or NOT_FOUND
 // tool error.
 func mapPathError(err error) *toolError {
+	var denied *DeniedError
 	switch {
+	case errors.As(err, &denied):
+		return mapPolicyDenied(denied.Reason)
+	case errors.Is(err, ErrReadOnly):
+		return &toolError{Code: "READ_ONLY", Message: "writes are disabled for this workspace", Reason: "write_disabled"}
 	case errors.Is(err, ErrAbsolutePath):
 		return &toolError{Code: "POLICY_DENIED", Message: "absolute path not allowed", Reason: "absolute_path"}
 	case errors.Is(err, ErrTraversal):

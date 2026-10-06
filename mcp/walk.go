@@ -4,11 +4,9 @@ import (
 	"errors"
 	"io/fs"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"github.com/charlievieth/fastwalk"
-	"github.com/mnehpets/workspace-mcp/grrep"
 )
 
 // fileMeta is one regular file discovered by the walk: its workspace-relative
@@ -21,16 +19,15 @@ type fileMeta struct {
 
 // collectFiles walks the workspace tree starting at startRel (a clean
 // workspace-relative slash path, "." for root) and returns the regular files
-// that pass the policy and ignore filters, each with its size. The traversal
-// mirrors grrep's walker: .git is always skipped, dotfiles/dirs are skipped,
-// non-regular files (including symlinks) are never followed, and blocked or
-// ignored directories are pruned.
+// that the Root lists, each with its size. Which paths are listed is decided
+// entirely by Root.Lister (access rules, dotfiles, .git, gitignore); this walker
+// has no filtering rules of its own. Non-regular files (including symlinks) are
+// never followed, and unlisted directories are pruned.
 //
-// fastwalk invokes the callback concurrently across goroutines, so every touch
-// of shared state — the results slice and the (non-thread-safe) ignore tree — is
-// serialized under mu. The callback body is cheap; fastwalk's own stat/readdir
-// work stays parallel.
-func collectFiles(root *Root, pol *Policy, ig *grrep.IgnoreSet, startRel string) ([]fileMeta, error) {
+// fastwalk invokes the callback concurrently across goroutines; the Lister is
+// safe for concurrent use and the results slice is guarded by mu. fastwalk's own
+// stat/readdir work stays parallel.
+func collectFiles(root *Root, startRel string) ([]fileMeta, error) {
 	base := root.Dir()
 	absStart := base
 	if startRel != "." {
@@ -41,6 +38,7 @@ func collectFiles(root *Root, pol *Policy, ig *grrep.IgnoreSet, startRel string)
 		mu    sync.Mutex
 		files []fileMeta
 	)
+	lister := root.Lister()
 	cfg := &fastwalk.Config{}
 	err := fastwalk.Walk(cfg, absStart, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -51,52 +49,22 @@ func collectFiles(root *Root, pol *Policy, ig *grrep.IgnoreSet, startRel string)
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
-		name := d.Name()
 
 		if d.IsDir() {
 			if p == absStart {
 				return nil
 			}
-			if name == ".git" {
+			if !lister.Listed(rel, true) {
 				return fs.SkipDir
-			}
-			if strings.HasPrefix(name, ".") {
-				return fs.SkipDir
-			}
-			if !pol.CheckDir(rel).Allowed {
-				return fs.SkipDir
-			}
-			if ig != nil {
-				mu.Lock()
-				ignored := ig.Match(rel, true)
-				if !ignored {
-					// Eager-build this dir's ignore node so child matches are cache hits.
-					ig.EnsureNode(rel)
-				}
-				mu.Unlock()
-				if ignored {
-					return fs.SkipDir
-				}
 			}
 			return nil
 		}
 
-		if strings.HasPrefix(name, ".") {
-			return nil
-		}
 		if !d.Type().IsRegular() {
 			return nil
 		}
-		if !pol.CheckFile(rel).Allowed {
+		if !lister.Listed(rel, false) {
 			return nil
-		}
-		if ig != nil {
-			mu.Lock()
-			ignored := ig.Match(rel, false)
-			mu.Unlock()
-			if ignored {
-				return nil
-			}
 		}
 		var size int64
 		if info, ierr := d.Info(); ierr == nil {
